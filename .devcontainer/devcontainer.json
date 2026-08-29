@@ -1,0 +1,7 @@
+{
+    "name": "ble-scale-sync (Node 22)",
+    "image": "mcr.microsoft.com/devcontainers/typescript-node:5.1.2-22-trixie",
+    "features": {
+        "ghcr.io/devcontainers/features/git:1": {}
+    }
+}
