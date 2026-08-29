@@ -46,7 +46,7 @@ describe('RobiS9Adapter', () => {
   });
 
   describe('onConnected() handshake', () => {
-    it('replays the captured FFB1 handshake in order (seq 00..0a)', async () => {
+    it('replays the captured B0/BA handshake verbatim', async () => {
       const writes: Buffer[] = [];
       const ctx = {
         profile: defaultProfile(),
@@ -61,10 +61,14 @@ describe('RobiS9Adapter', () => {
 
       await makeAdapter().onConnected(ctx);
 
-      expect(writes).toHaveLength(11);
-      // First frame is the B0 hello, last is B0 sub-code 02; seq increments 00..0a.
-      expect(writes[0].toString('hex')).toBe('000300b000000000000000000000000000000010');
+      expect(writes).toHaveLength(4);
+      writes.forEach((w) => expect(w).toHaveLength(20));
+      // seq 00..03, opcode B0 then BA x3.
       writes.forEach((w, i) => expect(w[0]).toBe(i));
+      expect(writes[0][3]).toBe(0xb0);
+      expect(writes[1][3]).toBe(0xba);
+      expect(writes[2][3]).toBe(0xba);
+      expect(writes[3][3]).toBe(0xba);
     });
   });
 
