@@ -25,7 +25,7 @@ interface HaMetricDef {
   entityCategory?: string;
 }
 
-const HA_METRICS: HaMetricDef[] = [
+const HA_METRICS = [
   { key: 'weight', name: 'Weight', unit: 'kg', deviceClass: 'weight', precision: 2 },
   {
     key: 'impedance',
@@ -48,23 +48,26 @@ const HA_METRICS: HaMetricDef[] = [
   },
   { key: 'bmr', name: 'BMR', unit: 'kcal', icon: 'mdi:fire' },
   { key: 'metabolicAge', name: 'Metabolic Age', unit: 'yr', icon: 'mdi:calendar-clock' },
-];
+  // `satisfies`, not `: HaMetricDef[]`: an annotation widens `key` to
+  // `keyof BodyComposition` and the completeness check below would then see
+  // every key as covered no matter what this list contains.
+] satisfies readonly HaMetricDef[];
 
-// Compile-time check: fails if a field is added to BodyComposition but not to HA_METRICS
-const _haKeysCheck: Record<keyof BodyComposition, true> = {
-  weight: true,
-  impedance: true,
-  bmi: true,
-  bodyFatPercent: true,
-  waterPercent: true,
-  boneMass: true,
-  muscleMass: true,
-  visceralFat: true,
-  physiqueRating: true,
-  bmr: true,
-  metabolicAge: true,
-};
-void _haKeysCheck;
+/**
+ * Compile-time check that every BodyComposition field has an HA metric.
+ *
+ * This used to be a SEPARATE hand-written `Record<keyof BodyComposition, true>`
+ * listing the keys again, which only ever checked itself: `HA_METRICS = []`
+ * still compiled, and adding a field to BodyComposition forced an edit to the
+ * bookkeeping record rather than to the metrics. The list above is the record
+ * now, so the two cannot drift.
+ */
+/** Reading view: the literal types above are for the completeness check only. */
+const HA_METRIC_DEFS: readonly HaMetricDef[] = HA_METRICS;
+
+type CoveredMetricKey = (typeof HA_METRICS)[number]['key'];
+const _haMetricsAreComplete: Record<Exclude<keyof BodyComposition, CoveredMetricKey>, never> = {};
+void _haMetricsAreComplete;
 
 export const mqttSchema: ExporterSchema = {
   name: 'mqtt',
@@ -245,7 +248,7 @@ export class MqttExporter implements Exporter {
       sw_version: pkg.version,
     };
 
-    for (const metric of HA_METRICS) {
+    for (const metric of HA_METRIC_DEFS) {
       const topic = `homeassistant/sensor/${deviceId}/${metric.key}/config`;
       const payload: Record<string, unknown> = {
         name: metric.name,
@@ -267,7 +270,7 @@ export class MqttExporter implements Exporter {
 
     await client.publishAsync(statusTopic, 'online', { qos: 1, retain: true });
     const suffix = slug ? ` (user: ${slug})` : '';
-    log.info(`Published HA discovery for ${HA_METRICS.length} metrics${suffix}.`);
+    log.info(`Published HA discovery for ${HA_METRIC_DEFS.length} metrics${suffix}.`);
   }
 
   async healthcheck(): Promise<ExportResult> {
