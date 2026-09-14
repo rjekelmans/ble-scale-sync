@@ -31,7 +31,7 @@ import { buildReadingSource } from './runtime/sources.js';
 import {
   buildSingleUserExporters,
   getExportersForUser,
-  collectConfiguredExporters,
+  resolveQueuedExporter,
   buildAllUniqueExporters,
 } from './runtime/exporters.js';
 
@@ -360,7 +360,7 @@ async function main(): Promise<void> {
     // is dropped: the queue is left for a real run.
     if (ctx.dryRun) return;
     try {
-      await flushQueue(ctx.exportQueuePath, collectConfiguredExporters(ctx));
+      await flushQueue(ctx.exportQueuePath, (entry) => resolveQueuedExporter(ctx, entry));
     } catch (err) {
       log.debug(`Retrying queued exports failed: ${errMsg(err)}`);
     }
