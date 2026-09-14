@@ -561,10 +561,48 @@ export interface HoldForComposition {
  * `implements ScaleAdapterCore, GattWiring, Unlockable` for author-facing
  * clarity and compile-time checking of that specific bundle.
  */
+/**
+ * Unlockable, or nothing of it.
+ *
+ * `Partial<Unlockable>` made every member independently optional, so an adapter
+ * could declare `unlockIntervalMs` with no command to send - a timer that fires
+ * forever and writes nothing. The two members are only meaningful together, and
+ * that is the whole constraint: this is not a general rewrite of the capability
+ * system, just the pairing the interface already documents.
+ */
+type MaybeUnlockable =
+  | {
+      readonly unlockCommand?: undefined;
+      readonly unlockCommands?: undefined;
+      readonly unlockIntervalMs?: undefined;
+    }
+  | Unlockable;
+
+/**
+ * BroadcastSource, with the one rule its own doc comment states.
+ *
+ * "Adapters that set this must implement parseServiceData or parseBroadcast"
+ * was a sentence, not a type: `preferPassive: true` with neither parser
+ * compiled, and it means an adapter that refuses to connect over GATT and
+ * cannot read an advertisement either - a scale that can never produce a
+ * reading. Everything else in the capability stays deliberately optional, as
+ * BroadcastSource documents.
+ */
+type MaybeBroadcastSource =
+  | (Partial<BroadcastSource> & { readonly preferPassive?: false | undefined })
+  | (Partial<BroadcastSource> & {
+      readonly preferPassive: true;
+      parseBroadcast(manufacturerData: Buffer): ScaleReading | null;
+    })
+  | (Partial<BroadcastSource> & {
+      readonly preferPassive: true;
+      parseServiceData(uuid: string, data: Buffer): ScaleReading | null;
+    });
+
 export type ScaleAdapter = ScaleAdapterCore &
   Partial<GattWiring> &
-  Partial<Unlockable> &
-  Partial<BroadcastSource> &
+  MaybeUnlockable &
+  MaybeBroadcastSource &
   Partial<MultiCharNotify> &
   Partial<AckProtocol> &
   Partial<HoldForComposition>;
