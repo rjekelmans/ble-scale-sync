@@ -211,17 +211,10 @@ export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> 
   });
 }
 
-export async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), ms);
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    clearTimeout(timer!);
-  }
-}
+// Canonical home is src/utils/timeout.ts: the MQTT exporter needs it too, and
+// an exporter importing from the BLE layer would be the wrong way round.
+// Re-exported here so the BLE call sites keep their existing import.
+export { withTimeout } from '../utils/timeout.js';
 
 /**
  * Like withTimeout, but the deadline restarts whenever `start`'s callback is

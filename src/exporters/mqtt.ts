@@ -6,6 +6,7 @@ import type { ExporterSchema } from '../interfaces/exporter-schema.js';
 import type { MqttConfig } from './config.js';
 import { withRetry } from '../utils/retry.js';
 import { errMsg } from '../utils/error.js';
+import { withTimeout } from '../utils/timeout.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json') as { version: string };
@@ -127,8 +128,96 @@ export const mqttSchema: ExporterSchema = {
   supportsPerUser: false,
 };
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type MqttClient = { publishAsync: any; endAsync: any };
+/**
+ * Just enough of mqtt's Client to use it. Structural on purpose: `mqtt` is a
+ * dynamic import so an install with no broker configured never loads it, and a
+ * top-level type import would defeat that.
+ */
+interface MqttClient {
+  publishAsync(topic: string, payload: string, opts: Record<string, unknown>): Promise<unknown>;
+  endAsync(force?: boolean): Promise<void>;
+  end(force?: boolean): void;
+  on(event: string, listener: (...args: unknown[]) => void): unknown;
+  removeListener(event: string, listener: (...args: unknown[]) => void): unknown;
+}
+
+/**
+ * Deadline for everything after the connect: discovery, the publish itself and
+ * the disconnect. Only the connect used to have one, so a publish that never
+ * settled - a broker that accepts TCP and then stops acknowledging QoS 1 - hung
+ * the export forever. `Promise.allSettled` in the orchestrator waits for every
+ * exporter to SETTLE, so the whole cycle stopped behind it and nothing asked
+ * the scale for another reading.
+ */
+const OPERATION_TIMEOUT_MS = 15_000;
+/** Closing is cleanup, not delivery; it gets a short leash and never blocks. */
+const DISCONNECT_TIMEOUT_MS = 5_000;
+
+/**
+ * Connect, owning the client from the moment it EXISTS rather than from the
+ * moment it is usable.
+ *
+ * `connectAsync` hands the client back only once it has connected, so a timeout
+ * racing that promise left the caller with no handle at all: the connection
+ * could still come up afterwards, with nobody left to close it. `connect()` is
+ * synchronous and returns the client immediately, so a failed or timed-out
+ * attempt still has something concrete to shut down.
+ */
+async function connectOwned(
+  brokerUrl: string,
+  options: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<MqttClient> {
+  const { connect } = await import('mqtt');
+  const client = connect(brokerUrl, options) as unknown as MqttClient;
+  const ready = new Promise<void>((resolve, reject) => {
+    const cleanup = (): void => {
+      client.removeListener('connect', onConnect);
+      client.removeListener('error', onError);
+    };
+    const onConnect = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err: unknown): void => {
+      cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    client.on('connect', onConnect);
+    client.on('error', onError);
+  });
+
+  try {
+    await withTimeout(ready, timeoutMs, 'MQTT connection timed out');
+    return client;
+  } catch (err) {
+    // We created it, so we close it - including on the timeout path, which is
+    // exactly where the old code had nothing to close.
+    await endQuietly(client);
+    throw err;
+  }
+}
+
+/**
+ * Close a client without letting the close decide whether the export worked.
+ *
+ * This used to be a bare `finally { await client.endAsync(); }` inside the
+ * retry, so a disconnect that rejected replaced an already-successful publish
+ * with a failure and the retry published the same reading again. A close that
+ * fails is worth a log line and a forced teardown, never a redelivery.
+ */
+async function endQuietly(client: MqttClient): Promise<void> {
+  try {
+    await withTimeout(client.endAsync(), DISCONNECT_TIMEOUT_MS, 'MQTT disconnect timed out');
+  } catch (err) {
+    log.debug(`Closing the MQTT connection failed: ${errMsg(err)}`);
+    try {
+      client.end(true);
+    } catch {
+      /* nothing further to try */
+    }
+  }
+}
 
 export class MqttExporter implements Exporter {
   readonly name = 'mqtt';
@@ -183,22 +272,17 @@ export class MqttExporter implements Exporter {
 
   async healthcheck(): Promise<ExportResult> {
     try {
-      const { connectAsync } = await import('mqtt');
-      const client = await Promise.race([
-        connectAsync(this.config.brokerUrl, {
+      const client = await connectOwned(
+        this.config.brokerUrl,
+        {
           clientId: `${this.config.clientId}-healthcheck`,
           username: this.config.username,
           password: this.config.password,
           connectTimeout: CONNECT_TIMEOUT_MS,
-        }),
-        new Promise<never>((_resolve, reject) =>
-          setTimeout(
-            () => reject(new Error('MQTT healthcheck timed out')),
-            CONNECT_TIMEOUT_MS + 2_000,
-          ),
-        ),
-      ]);
-      await client.endAsync();
+        },
+        CONNECT_TIMEOUT_MS + 2_000,
+      );
+      await endQuietly(client);
       return { success: true };
     } catch (err) {
       return { success: false, error: errMsg(err) };
@@ -206,7 +290,6 @@ export class MqttExporter implements Exporter {
   }
 
   async export(data: BodyComposition, context?: ExportContext): Promise<ExportResult> {
-    const { connectAsync } = await import('mqtt');
     const {
       brokerUrl,
       topic: baseTopic,
@@ -224,8 +307,9 @@ export class MqttExporter implements Exporter {
 
     return withRetry(
       async () => {
-        const client = await Promise.race([
-          connectAsync(brokerUrl, {
+        const client = await connectOwned(
+          brokerUrl,
+          {
             clientId,
             username,
             password,
@@ -233,26 +317,31 @@ export class MqttExporter implements Exporter {
             ...(statusTopic && {
               will: { topic: statusTopic, payload: Buffer.from('offline'), qos: 1, retain: true },
             }),
-          }),
-          new Promise<never>((_resolve, reject) =>
-            setTimeout(
-              () => reject(new Error('MQTT connection timed out')),
-              CONNECT_TIMEOUT_MS + 2_000,
-            ),
-          ),
-        ]);
+          },
+          CONNECT_TIMEOUT_MS + 2_000,
+        );
 
         try {
           if (haDiscovery) {
-            await this.publishDiscovery(client, context);
+            await withTimeout(
+              this.publishDiscovery(client, context),
+              OPERATION_TIMEOUT_MS,
+              'MQTT discovery publish timed out',
+            );
           }
 
           const payload = JSON.stringify(data);
-          await client.publishAsync(dataTopic, payload, { qos, retain });
+          await withTimeout(
+            client.publishAsync(dataTopic, payload, { qos, retain }),
+            OPERATION_TIMEOUT_MS,
+            'MQTT publish timed out',
+          );
           log.info(`Published to ${dataTopic} (qos=${qos}, retain=${retain}).`);
           return { success: true };
         } finally {
-          await client.endAsync();
+          // endQuietly never throws, so a failed disconnect cannot turn a
+          // delivered reading into a retry that publishes it a second time.
+          await endQuietly(client);
         }
       },
       { log, label: 'MQTT publish' },
