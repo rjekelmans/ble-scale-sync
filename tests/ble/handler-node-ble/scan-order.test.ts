@@ -184,11 +184,12 @@ describe('scanAndReadRaw call order (#368)', () => {
     expect(seen[0]).toBe('setPairingTarget');
   });
 
-  it('evicts the cached device before starting discovery', async () => {
-    // In continuous mode BlueZ hands back the previous cycle's Device1 unless
-    // it is removed, so the proxy is stale from the first frame.
+  it('does not evict the cached device on a successful cycle (#4)', async () => {
+    // Used to run unconditionally before every cycle, throwing away BlueZ's
+    // already-resolved GATT service tree and forcing a full rediscovery even
+    // on a clean reconnect. It now only runs from the failure-path teardown.
     const seen = await run();
-    expect(seen.indexOf('removeDevice')).toBeLessThan(seen.indexOf('startDiscoverySafe'));
+    expect(seen).not.toContain('removeDevice');
     expect(seen.indexOf('startDiscoverySafe')).toBeLessThan(seen.indexOf('waitDevice'));
   });
 
@@ -198,7 +199,6 @@ describe('scanAndReadRaw call order (#368)', () => {
       'setPairingTarget',
       'getAdapter',
       'isPowered',
-      'removeDevice',
       'startDiscoverySafe',
       'waitDevice',
       'device.getName',
