@@ -266,17 +266,6 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
       );
     }
 
-    // Previously this unconditionally removed the device from BlueZ's cache
-    // before every cycle (to dodge a stale D-Bus proxy after destroy()), but
-    // that also throws away BlueZ's already-resolved GATT service tree,
-    // forcing a full over-the-air rediscovery (2-19s, highly variable) on
-    // every single attempt -- unlike a paired phone, which reconnects almost
-    // instantly. The per-cycle full D-Bus connection reset added later
-    // (after every GATT operation, see the `finally` block below) already
-    // recreates the adapter/device chain from scratch, making that stale-proxy
-    // workaround redundant here. RemoveDevice is still called after a FAILED
-    // GATT attempt below, which is when a genuinely stale/orphaned device
-    // object is actually possible.
 
     const discoveryResult = await startDiscoverySafe(btAdapter, bleAdapter);
     if (discoveryResult) btAdapter = discoveryResult;
