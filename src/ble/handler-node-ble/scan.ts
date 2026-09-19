@@ -215,7 +215,6 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
       );
     }
 
-
     const discoveryResult = await startDiscoverySafe(btAdapter, bleAdapter);
     if (discoveryResult) btAdapter = discoveryResult;
     probeAdapter = btAdapter;
@@ -341,16 +340,7 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
       // connect but before the scan cycle fails, so the consecutive-failure
       // watchdog never trips (#273).
       const gatt = await acquireGattServer(device, preMatchedAdapter, scaleAuth?.pin);
-      // gatt.services() is a separate D-Bus round trip from device.gatt() above
-      // and can hang the same way (#273) if left unguarded: a name-prematched
-      // adapter (e.g. Robi S9) always takes this branch, so an unguarded stall
-      // here freezes every connection attempt at "Discovering services..."
-      // with no timeout, retry, or watchdog trip to recover it.
-      const serviceUuids = await withTimeout(
-        gatt.services(),
-        GATT_DISCOVERY_TIMEOUT_MS,
-        'GATT services() call timed out',
-      );
+      const serviceUuids = await gatt.services();
       bleLog.debug(`Services: [${serviceUuids.join(', ')}]`);
 
       let resolved: ScaleAdapter | undefined;
