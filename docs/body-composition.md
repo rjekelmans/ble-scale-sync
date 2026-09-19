@@ -48,6 +48,24 @@ The coefficients vary by gender and athlete status:
 | Female           | 0.490 | 0.150 | -0.130 | 11.5 |
 | Female (athlete) | 0.550 | 0.180 | -0.150 | 8.5  |
 
+### When an impedance is ignored
+
+An impedance only drives the calculation when it looks like a body. Anything
+below **150 ohm** or above **1200 ohm** is refused, and the reading falls back
+to the Deurenberg estimate below.
+
+The reason is that a wrong resistance is worse than none, and it fails
+convincingly rather than obviously. A value far too high pins the 60 % ceiling.
+A value far too low, which is what a missing or spurious factor of ten looks
+like, drives `height² / impedance` up until lean body mass exceeds body weight,
+and the result then pins the 4 % floor. Neither reads as an error; both silently
+move every derived metric.
+
+The raw impedance is still exported either way, so you can compare it against
+whatever your vendor app reports. If your scale publishes an impedance and your
+body fat still looks like a BMI estimate, that number is why, and it is worth
+opening an issue with it.
+
 ### Body fat fallback (Deurenberg)
 
 When impedance is not available (e.g. the scale only measures weight), only **weight**, **BMI**, and **body fat** (estimated) are calculated. The remaining metrics (water, bone, muscle, visceral fat, physique rating) require impedance and will not be available.
@@ -94,6 +112,10 @@ The Mi Scale 2 broadcasts **raw impedance** in its BLE advertisement (service da
 The adapter uses passive BLE advertisement decoding, so no pairing or GATT connection is required. This works on all transports including the ESPHome proxy.
 
 If impedance is not present in a frame (e.g. the user stepped off before the BIA measurement completed), weight is still reported and body fat is estimated using the Deurenberg BMI fallback. All other body composition metrics require impedance.
+
+### Xiaomi Body Composition Scale S400 (MJTZC01YM)
+
+The S400 broadcasts weight plus its 50 kHz impedance (and a 250 kHz impedance and heart rate that are logged only). Body composition uses the same Xiaomi formulas as the Mi Scale 2 above. The S400's own app runs Yunmai's proprietary dual-frequency model, which no open implementation reproduces; on the same weigh-in the Xiaomi formulas land within about two points of body fat, 0.3 kg of bone mass and 2 kg of skeletal muscle of the app, while the generic BIA coefficients were more than five points of body fat away. Water and visceral fat differ by a few points either way. Expect small, consistent offsets from the app, not agreement to the decimal.
 
 ### Yunmai
 

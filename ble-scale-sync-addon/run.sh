@@ -46,7 +46,8 @@ if [ "$CUSTOM_CONFIG" = "true" ]; then
   # hand is exactly the person who would toggle the UI option, see no change and
   # report a false negative. A wrong value for either is silent by nature, so a
   # setting that is silently ignored is worse here than almost anywhere else.
-  for _qn in qn_protocol_byte qn_report_byte qn_weight_ack auto_clear_stale_bond; do
+  for _qn in qn_protocol_byte qn_report_byte qn_weight_ack qn_a4_prelude \
+    qn_time_sync_long qn_config_long auto_clear_stale_bond; do
     if [ -n "$(opt "$_qn")" ]; then
       log "WARNING: custom_config is enabled, so the '$_qn' option is ignored."
       log "Set 'ble.$_qn' in $CUSTOM_PATH instead."
@@ -74,6 +75,39 @@ else
       QN_WEIGHT_ACK=""
       ;;
   esac
+  # Same free-text normalisation as qn_weight_ack above, for the same reason.
+  QN_A4_PRELUDE=$(opt qn_a4_prelude)
+  case "$(echo "$QN_A4_PRELUDE" | tr '[:upper:]' '[:lower:]')" in
+    "") QN_A4_PRELUDE="" ;;
+    true | yes | on | 1) QN_A4_PRELUDE="true" ;;
+    false | no | off | 0) QN_A4_PRELUDE="false" ;;
+    *)
+      log "WARNING: ignoring qn_a4_prelude='$QN_A4_PRELUDE' (expected true or false)."
+      QN_A4_PRELUDE=""
+      ;;
+  esac
+  # Same free-text normalisation again, same reason.
+  QN_TIME_SYNC_LONG=$(opt qn_time_sync_long)
+  case "$(echo "$QN_TIME_SYNC_LONG" | tr '[:upper:]' '[:lower:]')" in
+    "") QN_TIME_SYNC_LONG="" ;;
+    true | yes | on | 1) QN_TIME_SYNC_LONG="true" ;;
+    false | no | off | 0) QN_TIME_SYNC_LONG="false" ;;
+    *)
+      log "WARNING: ignoring qn_time_sync_long='$QN_TIME_SYNC_LONG' (expected true or false)."
+      QN_TIME_SYNC_LONG=""
+      ;;
+  esac
+  # Same free-text normalisation again, same reason.
+  QN_CONFIG_LONG=$(opt qn_config_long)
+  case "$(echo "$QN_CONFIG_LONG" | tr '[:upper:]' '[:lower:]')" in
+    "") QN_CONFIG_LONG="" ;;
+    true | yes | on | 1) QN_CONFIG_LONG="true" ;;
+    false | no | off | 0) QN_CONFIG_LONG="false" ;;
+    *)
+      log "WARNING: ignoring qn_config_long='$QN_CONFIG_LONG' (expected true or false)."
+      QN_CONFIG_LONG=""
+      ;;
+  esac
   AUTO_CLEAR_STALE_BOND=$(opt_bool auto_clear_stale_bond)
   PROXY_LIVENESS_MIN=$(opt_int proxy_liveness_timeout_min 30)
 
@@ -81,6 +115,17 @@ else
   HEIGHT_UNIT=$(opt height_unit)
   [ -z "$WEIGHT_UNIT" ] && WEIGHT_UNIT="kg"
   [ -z "$HEIGHT_UNIT" ] && HEIGHT_UNIT="cm"
+  OUT_OF_RANGE=$(opt out_of_range)
+  # Anything but the two known values would fail schema validation and take the
+  # whole add-on down, so an unrecognised value falls back to the default.
+  case "$OUT_OF_RANGE" in
+    warn | skip) ;;
+    "") OUT_OF_RANGE="warn" ;;
+    *)
+      log "WARNING: ignoring out_of_range='$OUT_OF_RANGE' (expected warn or skip)."
+      OUT_OF_RANGE="warn"
+      ;;
+  esac
 
   USER_NAME=$(opt user_name)
   USER_HEIGHT=$(opt_int user_height 170)
@@ -102,8 +147,21 @@ else
   GARMIN_ENABLED=$(opt_bool garmin_enabled)
   GARMIN_EMAIL=$(opt garmin_email)
   GARMIN_PASSWORD=$(opt garmin_password)
+  GARMIN_WEIGHT_ONLY=$(opt_bool garmin_weight_only)
+  # opt_bool echoes the raw option, and this one is interpolated unquoted into
+  # the generated YAML. The add-on schema declares it bool?, but a hand-edited
+  # options.json is not bound by that, and a stray string would produce YAML
+  # that fails to parse. Anything that is not exactly "true" is false.
+  [ "$GARMIN_WEIGHT_ONLY" = "true" ] || GARMIN_WEIGHT_ONLY=false
+  GARMIN_UPLOAD_TIMEOUT=$(opt_int garmin_upload_timeout_sec 180)
 
   SCAN_COOLDOWN=$(opt_int scan_cooldown 30)
+  # jq's // falls back only on null/false, so an explicit 0 survives.
+  IDLE_RESCAN_DELAY=$(opt_int idle_rescan_delay 5)
+  RETRY_FAILED_EXPORTS=$(opt_bool retry_failed_exports)
+  # Same guard as garmin_weight_only: opt_bool echoes the raw option and this is
+  # interpolated unquoted, so anything that is not exactly "false" is true.
+  [ "$RETRY_FAILED_EXPORTS" = "false" ] || RETRY_FAILED_EXPORTS=true
   DEBUG=$(opt_bool debug)
 
   # ── MQTT auto-detection from HA Mosquitto add-on ──────────────────────
@@ -209,8 +267,14 @@ YAML
     fi
   done
 
-  # BLE section (only if scale_mac, adapter, a forced scale adapter or a QN byte is set)
-  if [ -n "$SCALE_MAC" ] || [ -n "$BLE_ADAPTER" ] || [ -n "$FORCE_SCALE_ADAPTER" ]     || [ -n "$QN_PROTOCOL_BYTE" ] || [ -n "$QN_REPORT_BYTE" ] || [ -n "$QN_WEIGHT_ACK" ]     || [ "$AUTO_CLEAR_STALE_BOND" = "true" ] || [ "$PROXY_LIVENESS_MIN" != "30" ]; then
+  # BLE section, emitted only when at least one of its options is set.
+  # Every option written inside this block must also appear in the condition.
+  # qn_a4_prelude did not, so an install whose only BLE option was that one
+  # got no ble: block at all and the setting vanished without a word.
+  if [ -n "$SCALE_MAC" ] || [ -n "$BLE_ADAPTER" ] || [ -n "$FORCE_SCALE_ADAPTER" ] ||
+    [ -n "$QN_PROTOCOL_BYTE" ] || [ -n "$QN_REPORT_BYTE" ] || [ -n "$QN_WEIGHT_ACK" ] ||
+    [ -n "$QN_A4_PRELUDE" ] || [ -n "$QN_TIME_SYNC_LONG" ] || [ -n "$QN_CONFIG_LONG" ] ||
+    [ "$AUTO_CLEAR_STALE_BOND" = "true" ] || [ "$PROXY_LIVENESS_MIN" != "30" ]; then
     echo "ble:" >> "$FRESH"
     [ -n "$SCALE_MAC" ] && echo "  scale_mac: \"$(yaml_escape "$SCALE_MAC")\"" >> "$FRESH"
     [ -n "$BLE_ADAPTER" ] && echo "  adapter: \"$(yaml_escape "$BLE_ADAPTER")\"" >> "$FRESH"
@@ -218,6 +282,9 @@ YAML
     [ -n "$QN_PROTOCOL_BYTE" ] && echo "  qn_protocol_byte: $QN_PROTOCOL_BYTE" >> "$FRESH"
     [ -n "$QN_REPORT_BYTE" ] && echo "  qn_report_byte: $QN_REPORT_BYTE" >> "$FRESH"
     [ -n "$QN_WEIGHT_ACK" ] && echo "  qn_weight_ack: $QN_WEIGHT_ACK" >> "$FRESH"
+    [ -n "$QN_A4_PRELUDE" ] && echo "  qn_a4_prelude: $QN_A4_PRELUDE" >> "$FRESH"
+    [ -n "$QN_TIME_SYNC_LONG" ] && echo "  qn_time_sync_long: $QN_TIME_SYNC_LONG" >> "$FRESH"
+    [ -n "$QN_CONFIG_LONG" ] && echo "  qn_config_long: $QN_CONFIG_LONG" >> "$FRESH"
     [ "$AUTO_CLEAR_STALE_BOND" = "true" ] && echo "  auto_clear_stale_bond: true" >> "$FRESH"
     [ "$PROXY_LIVENESS_MIN" != "30" ] && echo "  proxy_liveness_timeout_min: $PROXY_LIVENESS_MIN" >> "$FRESH"
     echo "" >> "$FRESH"
@@ -229,6 +296,7 @@ scale:
   height_unit: $HEIGHT_UNIT
 
 unknown_user: nearest
+out_of_range: $OUT_OF_RANGE
 
 users:
   - name: "$(yaml_escape "$USER_NAME")"
@@ -286,6 +354,8 @@ YAML
     email: "$(yaml_escape "$GARMIN_EMAIL")"
     password: "$(yaml_escape "$GARMIN_PASSWORD")"
     token_dir: /data/garmin-tokens
+    weight_only: $GARMIN_WEIGHT_ONLY
+    upload_timeout_sec: $GARMIN_UPLOAD_TIMEOUT
 YAML
     fi
 
@@ -298,6 +368,8 @@ YAML
 runtime:
   continuous_mode: true
   scan_cooldown: $SCAN_COOLDOWN
+  idle_rescan_delay: $IDLE_RESCAN_DELAY
+  retry_failed_exports: $RETRY_FAILED_EXPORTS
   dry_run: false
   debug: $DEBUG
 

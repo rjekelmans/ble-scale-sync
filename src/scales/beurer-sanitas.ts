@@ -9,7 +9,13 @@ import type {
   UserProfile,
   BodyComposition,
 } from '../interfaces/scale-adapter.js';
-import { uuid16, buildPayload } from './body-comp-helpers.js';
+import {
+  uuid16,
+  buildPayload,
+  biaFatIfPlausible,
+  ReadingComposition,
+} from './body-comp-helpers.js';
+import { bleLog } from '../ble/types.js';
 import type { MatchDescriptor } from './match-descriptor.js';
 
 // Beurer/Sanitas custom BLE service + characteristic
@@ -32,11 +38,25 @@ const KNOWN_NAMES = [
   'aicdscale1',
 ];
 
+/**
+ * Composition the scale computed itself, when it sent one.
+ *
+ * Every field is optional because a zero is not a measurement. buildPayload
+ * gates on `comp.fat ?? estimateBodyFat(...)`, which `0` passes, so a frame
+ * carrying a real impedance next to a zeroed fat used to export 0 % body fat,
+ * 73 % water and a muscle mass equal to the whole body. The sibling SIG adapter
+ * has guarded against exactly that since #211; this one never did.
+ */
 interface CachedComp {
-  fat: number;
-  water: number;
-  muscle: number;
-  bone: number;
+  fat?: number;
+  water?: number;
+  muscle?: number;
+  bone?: number;
+}
+
+/** A scale-reported value, or undefined when the scale reported nothing. */
+function measured(v: number): number | undefined {
+  return v > 0 ? v : undefined;
 }
 
 /**
@@ -101,6 +121,8 @@ export class BeurerSanitasScaleAdapter
     return this.isBf710Type ? [0xe7, 0x01] : [0xf7, 0x01];
   }
   private cachedComp: CachedComp | null = null;
+  /** Composition as it stood when each reading was emitted; see `emit()`. */
+  private readonly compByReading = new ReadingComposition<CachedComp | null>();
 
   /** Accumulated 0x59 composition parts (part number -> payload after byte 4). */
   private compParts = new Map<number, Buffer>();
@@ -161,6 +183,22 @@ export class BeurerSanitasScaleAdapter
    * (unregistered user) falls back to the weight-only stability window.
    */
   parseNotification(data: Buffer): ScaleReading | null {
+    // Latch the variant off the frame itself, not only off the advertised name.
+    // `matches()` is the only other place that sets it, and it does not always
+    // run: `ble.force_scale_adapter` replaces the matcher wholesale, and a unit
+    // advertising a name that is not in KNOWN_NAMES never reaches it either. A
+    // BF710/SBF70/SBF75 opens every frame with 0xE7, while a BF700/BF800 frame
+    // opens with a Unix timestamp, whose top byte does not reach 0xE7 until
+    // 2092. Without this an SBF70 fell through to the BF700 layout, where the
+    // 5-byte live frames are too short to parse and the 0x59 finalize frame
+    // decodes as a constant 12.80 kg (#384, same symptom as #112).
+    if (!this.isBf710Type && data.length >= 2 && data[0] === 0xe7) {
+      this.isBf710Type = true;
+      bleLog.debug(
+        'Beurer/Sanitas: 0xE7 frame seen, switching to the BF710/SBF70/SBF75 frame layout',
+      );
+    }
+
     if (this.isBf710Type) {
       return this.parseBf710Notification(data);
     }
@@ -177,14 +215,14 @@ export class BeurerSanitasScaleAdapter
       impedance = data.readUInt16BE(6);
 
       this.cachedComp = {
-        fat: data.readUInt16BE(8) / 10,
-        water: data.readUInt16BE(10) / 10,
-        muscle: data.readUInt16BE(12) / 10,
-        bone: (data.readUInt16BE(14) * 50) / 1000,
+        fat: measured(data.readUInt16BE(8) / 10),
+        water: measured(data.readUInt16BE(10) / 10),
+        muscle: measured(data.readUInt16BE(12) / 10),
+        bone: measured((data.readUInt16BE(14) * 50) / 1000),
       };
     }
 
-    return { weight, impedance };
+    return this.emit(weight, impedance);
   }
 
   private parseBf710Notification(data: Buffer): ScaleReading | null {
@@ -201,7 +239,7 @@ export class BeurerSanitasScaleAdapter
         this.readingBuffer.shift();
       }
       this.cachedComp = null;
-      return { weight, impedance: 0 };
+      return this.emit(weight, 0);
     }
 
     if (cmd === 0x59 && data.length >= 4) {
@@ -262,8 +300,60 @@ export class BeurerSanitasScaleAdapter
     }
     if (weight <= 0 || weight > 300 || !Number.isFinite(weight)) return null;
 
-    this.cachedComp = { fat, water, muscle, bone };
-    return { weight, impedance };
+    this.cachedComp = {
+      fat: measured(fat),
+      water: measured(water),
+      muscle: measured(muscle),
+      bone: measured(bone),
+    };
+    return this.emit(weight, impedance);
+  }
+
+  /**
+   * Build a reading and pin the composition that produced it onto it.
+   *
+   * `computeMetrics()` runs LATER than the parse that built the reading, and
+   * the very next parse nulls `cachedComp`. On the watcher transports
+   * (mqtt-proxy, esphome-proxy) that next parse can belong to the NEXT session:
+   * `loop.ts` awaits `processReading()` - network exports included - while the
+   * watcher is free to open another GATT session. Reading the live cache in
+   * `computeMetrics` would then hand the completed reading a null. Weak so the
+   * processor dropping a reading frees the snapshot.
+   */
+  private emit(weight: number, impedance: number): ScaleReading {
+    const reading: ScaleReading = { weight, impedance };
+    this.compByReading.pin(reading, this.cachedComp ? { ...this.cachedComp } : null);
+    return reading;
+  }
+
+  /**
+   * Clear the previous weigh-in's gating state (#394).
+   *
+   * `readingBuffer` fed the three-sample stability gate, so a second session
+   * inherited a full buffer and could satisfy it one frame in, on a weight that
+   * had not settled. `compParts` holds partial 0x59 chunks; a session that died
+   * mid-stream left them behind and the next reassembly could splice a
+   * composition out of two different weigh-ins.
+   *
+   * Two fields are deliberately NOT cleared here:
+   *
+   *   - `cachedComp` is read by computeMetrics, which runs after the session is
+   *     over. Clearing per-session state that a later computeMetrics reads is
+   *     the trap this whole change exists to avoid, and it is why onSessionEnd
+   *     was the wrong hook. It does NOT get nulled at the top of every parse -
+   *     only on the paths that go on to build a reading (the length/range
+   *     guards return first). What holds is the weaker but sufficient
+   *     invariant: every path that RETURNS a reading nulls or overwrites it
+   *     first, and `emit()` then snapshots it onto that reading. Preserve that
+   *     invariant if a fourth return path is ever added.
+   *   - `isBf710Type` drives the `unlockCommand` and `completionHoldMs` getters,
+   *     which are read at session start before any frame. Clearing the latch
+   *     would send [0xF7 0x01] and a 0 ms hold to a BF710 whose advertised name
+   *     is not in KNOWN_NAMES, which is the #384 case the latch exists for.
+   */
+  onSessionStart(): void {
+    this.readingBuffer.length = 0;
+    this.compParts.clear();
   }
 
   isComplete(reading: ScaleReading): boolean {
@@ -278,21 +368,28 @@ export class BeurerSanitasScaleAdapter
   }
 
   computeMetrics(reading: ScaleReading, profile: UserProfile): BodyComposition {
-    const comp = this.cachedComp;
-    if (comp) {
-      return buildPayload(
-        reading.weight,
-        reading.impedance,
-        {
-          fat: comp.fat,
-          water: comp.water,
-          muscle: comp.muscle,
-          bone: comp.bone,
-        },
-        profile,
-      );
-    }
-
-    return buildPayload(reading.weight, reading.impedance, {}, profile);
+    // Per-reading snapshot taken in emit(). `has` rather than `??`, because a
+    // null snapshot ("this reading carried no composition") is a real answer
+    // and must not fall through to the live cache. The fallback is only for a
+    // reading this adapter did not build (direct callers, tests).
+    const snapshot = this.compByReading.of(reading, this.cachedComp);
+    const comp = snapshot ?? {};
+    // The scale's own figure wins when it sent one. Where it did not, the
+    // impedance this adapter already parsed is used rather than thrown away
+    // (#386). On the normal path the two arrive together, so this mostly
+    // matters for a frame that carried a resistance and a zeroed composition,
+    // and under BLE_RAW_CAPTURE, where a rejected trailing weight frame can
+    // clear the cache while the captured reading still holds an impedance.
+    return buildPayload(
+      reading.weight,
+      reading.impedance,
+      {
+        fat: comp.fat ?? biaFatIfPlausible(reading.weight, reading.impedance, profile),
+        water: comp.water,
+        muscle: comp.muscle,
+        bone: comp.bone,
+      },
+      profile,
+    );
   }
 }

@@ -7,6 +7,19 @@ export type Gender = 'male' | 'female';
 /** Minimal BLE advertisement info needed for adapter matching. */
 export interface BleDeviceInfo {
   localName: string;
+  /**
+   * The device's own BLE address, uppercase colon-separated, when the transport
+   * knows it. Every transport supplies it; it is optional only so that the many
+   * hand-written test fixtures stay valid.
+   *
+   * It exists for advertisements that identify themselves by echoing their own
+   * MAC inside the payload. Matching on such an echo is self-validating in a way
+   * a bare company id is not: a device that is not this scale will not
+   * accidentally contain the address it is advertising from. The Lefu family
+   * fingerprint uses the same trick, and #376 needed it for an ES-CS20M
+   * revision that advertises anonymously, with no name and no service UUIDs.
+   */
+  address?: string;
   serviceUuids: string[];
   /** Manufacturer-specific data from the BLE advertisement (if present). */
   manufacturerData?: { id: number; data: Buffer };
@@ -175,8 +188,15 @@ export interface ConnectionContext {
  * S800 MiBeacon bind key. Adapters that do not need it omit `configure`.
  */
 export interface AdapterRuntimeConfig {
-  /** MiBeacon bind key (32 hex chars) for broadcast-encrypted scales (Xiaomi S800). */
+  /** MiBeacon bind key (32 hex chars) for broadcast-encrypted scales (Xiaomi S800 / S400). */
   bindKey?: string;
+  /**
+   * Effective scale address (`ble.scale_mac` or `SCALE_MAC`). MiBeacon adapters
+   * use it as the AES-CCM nonce MAC when a frame omits its own (the S400
+   * measurement frame) and no MAC-carrying frame was seen yet. Ignored by
+   * adapters that do not decrypt broadcasts.
+   */
+  scaleMac?: string;
   /**
    * Configured display unit (`scale.weight_unit`). Adapters whose protocol tells
    * the scale which unit to show (e.g. the QN 0x13 config command) honour this so
@@ -214,6 +234,34 @@ export interface AdapterRuntimeConfig {
    * false disables it everywhere.
    */
   qnWeightAck?: boolean;
+  /**
+   * Send the two 0xA4 0x0F frames the Arboleaf vendor app sends between START
+   * and the first live 0x10 frame (`ble.qn_a4_prelude`, #331).
+   *
+   * Off by default and opt-in per install: the frames are replayed verbatim
+   * from one reporter's HCI capture of their own unit, their payload is not
+   * decoded, and every other QN scale in the registry reads today without
+   * them.
+   */
+  qnA4Prelude?: boolean;
+  /**
+   * Send the 9-byte form of the QN 0x20 time-sync frame
+   * (`ble.qn_time_sync_long`, #331).
+   *
+   * The vendor app's frame carries one extra `0x08` before the checksum and is
+   * otherwise identical to ours, timestamp included. The byte is undecoded, so
+   * this is off by default.
+   */
+  qnTimeSyncLong?: boolean;
+
+  /**
+   * Send the 10-byte form of the QN 0x13 config frame, instead of the 9-byte
+   * one (`ble.qn_config_long`, #331).
+   *
+   * The last documented difference between this app's QN handshake and the
+   * vendor app's. Undecoded, opt-in, off by default.
+   */
+  qnConfigLong?: boolean;
 }
 
 /**
@@ -265,8 +313,68 @@ export interface ScaleAdapterCore {
   onConnected?(context: ConnectionContext): Promise<void> | void;
 
   /**
+   * Called once at the start of a GATT session, before any characteristic is
+   * subscribed and therefore before the first frame can be parsed.
+   *
+   * This is where an adapter clears per-session state. Neither of the other two
+   * hooks can do that job (#394):
+   *
+   *   - `onSessionEnd` runs inside `finishWith`, which is BEFORE the resolved
+   *     reading reaches `computeMetrics`. Clearing a composition cache there
+   *     deletes fat/water/muscle/bone from the reading that just completed.
+   *   - `onConnected` pre-empts the legacy unlock, so an `Unlockable` adapter
+   *     that declares it never wakes its scale.
+   *
+   * Adapters are shared singletons. Without this an adapter cannot tell a fresh
+   * weigh-in from the previous one, and a stale cached weight or completeness
+   * flag lets the next session resolve on the last person's data.
+   *
+   * It clears GATING state safely, but it is NOT a safe place to clear state a
+   * previous reading's `computeMetrics` still needs. Session N+1's
+   * `onSessionStart` is not ordered after session N's `computeMetrics`: on the
+   * watcher transports the watcher keeps running while `loop.ts` awaits
+   * `processReading()` (network exports included) and can open the next GATT
+   * session in the meantime. An adapter that carries composition out of band in
+   * its own fields must pin it onto the reading it belongs to, taking the
+   * snapshot at emit time, rather than read the live cache in `computeMetrics`.
+   * Use `ReadingComposition` from `body-comp-helpers.ts` for that: it owns the
+   * `WeakMap` and the reasoning, and `of()` deliberately checks `has()` rather
+   * than falling back on a nullish value, so an adapter whose "no composition"
+   * state is itself null stays correct. Hand-rolling it is how six copies of
+   * the same paragraph drifted apart in type; `beurer-bf720`,
+   * `beurer-sanitas`, `hoffen`, `mgb`, `medisana-bs44x` and `senssun` are those
+   * copies and are still to be converted.
+   *
+   * It is a GATT-session hook only. The broadcast path never opens a session,
+   * so `parseBroadcast` / `parseServiceData` run without it ever firing. Adding
+   * a broadcast parser to an adapter that relies on this reset would silently
+   * bypass it; today every such adapter either has no broadcast parser or, like
+   * `eufy-p2`, has a stateless one.
+   *
+   * Must not throw and must not perform I/O: nothing is connected yet. Reading
+   * a value the adapter already recorded is fine, which is what the address is
+   * for: an adapter that keeps per-device state (yunmai's Mini/SE variant) can
+   * resolve it here, for the device this session is about to read, rather than
+   * carrying whatever `matches()` last saw.
+   *
+   * `deviceAddress` is uppercase with no separators, and it is NOT always a
+   * MAC: on macOS the noble transport supplies the CoreBluetooth UUID instead,
+   * which will simply not match anything recorded from an advertisement. Treat
+   * an unrecognised address as "unknown", never as a reason to reset.
+   */
+  onSessionStart?(deviceAddress?: string): void;
+
+  /**
    * Called once when a GATT session ends, however it ends: a completed reading,
    * a disconnect, a timeout or an init failure.
+   *
+   * NOT a place to clear state a later `computeMetrics` reads: this runs before
+   * the reading is handed to the caller. Use `onSessionStart` for that (#394).
+   *
+   * It is also weaker than it looks. A timeout abandons the read promise rather
+   * than cancelling it, so this fires only once a disconnect event follows, and
+   * the ESPHome proxy scan path can drop a session without reaching cleanup at
+   * all. Treat it as best effort for releasing references, not as a guarantee.
    *
    * Adapters are shared singletons, so anything captured from a
    * `ConnectionContext` (a write function, a queued frame, a negotiated

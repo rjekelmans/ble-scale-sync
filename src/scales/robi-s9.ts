@@ -44,7 +44,6 @@ function buildHandshake(): Buffer[] {
   ];
 }
 
-
 // Weight is stored as a 3-byte big-endian gram count in the A3 result frame
 // (#248: 01 2d c2 = 77250 g = 77.25 kg). The earlier #228 guess treated the high
 // gram bytes (01 2c..) as a constant prefix because both prior captures were
@@ -127,7 +126,16 @@ export class RobiS9Adapter implements ScaleAdapterCore, GattWiring, MultiCharNot
     return hasFfb0 && hasFfb3;
   }
 
-  private resetState(): void {
+  /**
+   * Clear the previous weigh-in before anything is subscribed (#394).
+   *
+   * This used to live in `onConnected`, which is too late for a multi-char
+   * adapter: `subscribeAndInit` enables EVERY notify binding and only then
+   * awaits `startInit()`, so frames can already be arriving - through several
+   * D-Bus round trips for the second and third binding - while the reset has
+   * not run. `onSessionStart` runs before the first subscribe.
+   */
+  onSessionStart(): void {
     this.cachedWeight = 0;
     this.cachedImpedance = 0;
     this.cachedHeartRate = 0;
@@ -135,7 +143,6 @@ export class RobiS9Adapter implements ScaleAdapterCore, GattWiring, MultiCharNot
   }
 
   async onConnected(ctx: ConnectionContext): Promise<void> {
-    this.resetState();
     for (const frame of buildHandshake()) {
       bleLog.debug(`Robi S9 handshake write: ${frame.toString('hex')}`);
       await ctx.write(CHR_FFB1, frame, true);
@@ -150,7 +157,7 @@ export class RobiS9Adapter implements ScaleAdapterCore, GattWiring, MultiCharNot
    * notification gets reported as a fresh result. So, reset here too.
    */
   onSessionEnd(): void {
-    this.resetState();
+    this.onSessionStart();
   }
 
   parseCharNotification(_charUuid: string, data: Buffer): ScaleReading | null {
@@ -193,8 +200,15 @@ export class RobiS9Adapter implements ScaleAdapterCore, GattWiring, MultiCharNot
   }
 
   computeMetrics(reading: ScaleReading, profile: UserProfile): BodyComposition {
-    // Body composition via BIA from weight + impedance; the vendor's own
-    // body-comp frames are scrambled and not decoded.
+    // NOT BIA, despite what this comment used to say. `parseCharNotification`
+    // emits `impedance: 0` on purpose: the only captured A3 frame has all-zero
+    // bytes after the weight, so there is no impedance offset to read yet
+    // (#248). The vendor's own body-comp frames are scrambled and not decoded
+    // either, so body composition here is the Deurenberg BMI estimate and will
+    // stay that way until someone posts a capture with a known impedance.
+    //
+    // Listed in #386 as an adapter that reads an impedance and ignores it. It
+    // does not read one.
     return buildPayload(reading.weight, reading.impedance, {}, profile);
   }
 }

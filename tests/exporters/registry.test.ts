@@ -16,6 +16,60 @@ import { TelegramExporter } from '../../src/exporters/telegram.js';
 import { IntervalsExporter } from '../../src/exporters/intervals.js';
 import type { ExporterEntry } from '../../src/config/schema.js';
 
+// ─── boolean fields from ${ENV_VAR} ────────────────────────────────────────
+//
+// ExporterEntrySchema is passthrough and env references resolve to STRINGS
+// before the schema sees them, so a bare `as boolean` cast read a configured
+// "false" as true: the exact inverse of what the user wrote, silently. The
+// helper was introduced for garmin.weight_only in #373 and now covers every
+// boolean an exporter reads.
+describe('boolean exporter fields resolved from strings', () => {
+  const CASES: Array<[string, string, string]> = [
+    ['mqtt', 'retain', 'retain'],
+    ['mqtt', 'ha_discovery', 'haDiscovery'],
+    ['ntfy', 'report_exports', 'reportExports'],
+    ['telegram', 'silent', 'silent'],
+    ['telegram', 'report_exports', 'reportExports'],
+    ['wger', 'sync_measurements', 'syncMeasurements'],
+  ];
+
+  const base: Record<string, Record<string, unknown>> = {
+    mqtt: { broker_url: 'mqtt://localhost:1883', topic: 'scale' },
+    ntfy: { topic: 'scale' },
+    telegram: { bot_token: 't', chat_id: '1' },
+    wger: { base_url: 'https://wger.example', token: 'tok' },
+  };
+
+  it.each(CASES)('reads %s.%s = "false" as false, not as true', (type, key, field) => {
+    const entry = { type, ...base[type], [key]: 'false' } as unknown as ExporterEntry;
+    const exporter = createExporterFromEntry(entry) as unknown as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const cfg = Object.values(exporter).find(
+      (v) => v && typeof v === 'object' && field in v,
+    ) as Record<string, unknown>;
+    expect(cfg[field]).toBe(false);
+  });
+
+  it.each(CASES)('reads %s.%s = "true" as true', (type, key, field) => {
+    const entry = { type, ...base[type], [key]: 'true' } as unknown as ExporterEntry;
+    const exporter = createExporterFromEntry(entry) as unknown as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const cfg = Object.values(exporter).find(
+      (v) => v && typeof v === 'object' && field in v,
+    ) as Record<string, unknown>;
+    expect(cfg[field]).toBe(true);
+  });
+
+  it.each(CASES)('throws rather than guessing on %s.%s = "maybe"', (type, key) => {
+    const entry = { type, ...base[type], [key]: 'maybe' } as unknown as ExporterEntry;
+    expect(() => createExporterFromEntry(entry)).toThrow(/must be true or false/);
+  });
+});
+
 // ─── EXPORTER_REGISTRY ─────────────────────────────────────────────────────
 
 describe('EXPORTER_REGISTRY', () => {
@@ -233,6 +287,23 @@ describe('KNOWN_EXPORTER_NAMES', () => {
     expect(KNOWN_EXPORTER_NAMES.has('intervals')).toBe(true);
     expect(KNOWN_EXPORTER_NAMES.has('runalyze')).toBe(true);
     expect(KNOWN_EXPORTER_NAMES.has('wger')).toBe(true);
+  });
+});
+
+// #406: three hand-maintained lists of the same eleven names. Adding a twelfth
+// exporter per the documented steps but forgetting config.ts passes lint,
+// typecheck and the whole suite, and then rejects EXPORTERS=x at runtime with
+// "Unknown exporter". This is the cheapest guard against that.
+describe('the exporter name lists agree', () => {
+  it('KNOWN_EXPORTERS in config.ts matches the registry', async () => {
+    const { _knownExporterNamesForTest } = await import('../../src/exporters/config.js');
+    expect([..._knownExporterNamesForTest].sort()).toEqual([...KNOWN_EXPORTER_NAMES].sort());
+  });
+
+  it('has one registry entry per known name, with no duplicates', () => {
+    // A duplicated schema name would make the derived set smaller than the
+    // registry, and the equality test above would still pass.
+    expect(KNOWN_EXPORTER_NAMES.size).toBe(EXPORTER_REGISTRY.length);
   });
 });
 

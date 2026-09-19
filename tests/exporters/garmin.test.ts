@@ -299,4 +299,228 @@ describe('GarminExporter', () => {
     const stdinBody = captured.getStdinBody();
     expect(stdinBody).not.toContain('"timestamp"');
   });
+
+  // ─── Weight only ──────────────────────────────────────────────────────────
+
+  it('flags the stdin payload weight_only when configured', async () => {
+    const captured = makeCapturingUploadFactory(JSON.stringify({ success: true }), 0);
+
+    mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === '--version') return createVersionCheckProc(0);
+      return captured.factory();
+    });
+
+    const { GarminExporter } = await import('../../src/exporters/garmin.js');
+    const exporter = new GarminExporter({ weight_only: true });
+    const result = await exporter.export(samplePayload);
+
+    expect(result.success).toBe(true);
+    const payload = JSON.parse(captured.getStdinBody());
+    expect(payload.weight_only).toBe(true);
+    expect(payload.weight).toBe(80);
+    // The metrics still cross the wire; garmin_upload.py is what drops them, so
+    // the flag stays the single place the decision is made.
+    expect(payload.bmi).toBe(23.9);
+  });
+
+  it('omits weight_only from the payload by default', async () => {
+    const captured = makeCapturingUploadFactory(JSON.stringify({ success: true }), 0);
+
+    mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === '--version') return createVersionCheckProc(0);
+      return captured.factory();
+    });
+
+    const { GarminExporter } = await import('../../src/exporters/garmin.js');
+    const exporter = new GarminExporter();
+    await exporter.export(samplePayload);
+
+    expect(captured.getStdinBody()).not.toContain('weight_only');
+  });
+
+  it('combines weight_only with a back-dated timestamp', async () => {
+    const captured = makeCapturingUploadFactory(JSON.stringify({ success: true }), 0);
+
+    mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === '--version') return createVersionCheckProc(0);
+      return captured.factory();
+    });
+
+    const { GarminExporter } = await import('../../src/exporters/garmin.js');
+    const exporter = new GarminExporter({ weight_only: true });
+    await exporter.export(samplePayload, { timestamp: new Date('2025-07-01T07:15:00Z') });
+
+    const payload = JSON.parse(captured.getStdinBody());
+    expect(payload.weight_only).toBe(true);
+    expect(payload.timestamp).toBe('2025-07-01T07:15:00.000Z');
+  });
+
+  it('is off when the registry factory gets no weight_only key', async () => {
+    const captured = makeCapturingUploadFactory(JSON.stringify({ success: true }), 0);
+
+    mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === '--version') return createVersionCheckProc(0);
+      return captured.factory();
+    });
+
+    const { createExporterFromEntry } = await import('../../src/exporters/registry.js');
+    const exporter = createExporterFromEntry({ type: 'garmin', email: 'a@b.c', password: 'x' });
+    await exporter.export(samplePayload);
+
+    expect(captured.getStdinBody()).not.toContain('weight_only');
+  });
+
+  it('is on when the registry factory gets weight_only: true from config.yaml', async () => {
+    const captured = makeCapturingUploadFactory(JSON.stringify({ success: true }), 0);
+
+    mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === '--version') return createVersionCheckProc(0);
+      return captured.factory();
+    });
+
+    const { createExporterFromEntry } = await import('../../src/exporters/registry.js');
+    const exporter = createExporterFromEntry({
+      type: 'garmin',
+      email: 'a@b.c',
+      password: 'x',
+      weight_only: true,
+    });
+    await exporter.export(samplePayload);
+
+    expect(JSON.parse(captured.getStdinBody()).weight_only).toBe(true);
+  });
+
+  // ExporterEntrySchema is passthrough and `${ENV_VAR}` references resolve to
+  // strings, so the string spellings reach the factory verbatim. Reading
+  // "false" as true would silently invert the setting.
+  it.each([
+    ['true', true],
+    ['yes', true],
+    ['1', true],
+    ['on', true],
+    ['TRUE', true],
+    ['false', false],
+    ['no', false],
+    ['0', false],
+    ['off', false],
+    ['', false],
+  ])('coerces the string weight_only %j to %s', async (raw, expected) => {
+    const captured = makeCapturingUploadFactory(JSON.stringify({ success: true }), 0);
+
+    mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === '--version') return createVersionCheckProc(0);
+      return captured.factory();
+    });
+
+    const { createExporterFromEntry } = await import('../../src/exporters/registry.js');
+    const exporter = createExporterFromEntry({
+      type: 'garmin',
+      email: 'a@b.c',
+      password: 'x',
+      weight_only: raw,
+    });
+    await exporter.export(samplePayload);
+
+    const payload = JSON.parse(captured.getStdinBody());
+    expect(payload.weight_only).toBe(expected ? true : undefined);
+  });
+
+  it('rejects a weight_only value that is neither boolean nor a known spelling', async () => {
+    const { createExporterFromEntry } = await import('../../src/exporters/registry.js');
+    expect(() =>
+      createExporterFromEntry({
+        type: 'garmin',
+        email: 'a@b.c',
+        password: 'x',
+        weight_only: 'maybe',
+      }),
+    ).toThrow(/must be true or false/);
+  });
+});
+
+describe('GarminExporter upload timeout (#399)', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    const mod = await import('../../src/exporters/garmin.js');
+    mod._resetPythonCache();
+  });
+
+  /** A process that never answers, so only the spawn options matter. */
+  function createSilentProc(): MockProc {
+    const proc = new EventEmitter() as MockProc;
+    proc.stdin = new Writable({
+      write(_chunk, _enc, cb) {
+        cb();
+      },
+    });
+    proc.stdout = new PassThrough();
+    proc.stderr = null;
+    return proc;
+  }
+
+  it('defaults to 180s, not the old hard-coded 60s', async () => {
+    mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === '--version') return createVersionCheckProc(0);
+      return createSilentProc();
+    });
+
+    const { GarminExporter } = await import('../../src/exporters/garmin.js');
+    void new GarminExporter().export(samplePayload);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(mockSpawn.mock.calls[1][2]).toMatchObject({ timeout: 180_000 });
+  });
+
+  it('passes a configured timeout to spawn and names it in the timeout error', async () => {
+    mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === '--version') return createVersionCheckProc(0);
+      const proc = createSilentProc();
+      // SIGTERM close is what Node's own spawn timeout produces.
+      process.nextTick(() => proc.emit('close', null, 'SIGTERM'));
+      return proc;
+    });
+
+    const { GarminExporter } = await import('../../src/exporters/garmin.js');
+    const exporter = new GarminExporter({ upload_timeout_sec: 300 });
+    const result = await exporter.export(samplePayload);
+
+    expect(mockSpawn.mock.calls[1][2]).toMatchObject({ timeout: 300_000 });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/timed out after 300s/);
+  });
+
+  it('accepts the value as a string, which is what a ${ENV_VAR} reference resolves to', async () => {
+    const { createExporterFromEntry } = await import('../../src/exporters/registry.js');
+    mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === '--version') return createVersionCheckProc(0);
+      return createSilentProc();
+    });
+
+    const exporter = createExporterFromEntry({
+      type: 'garmin',
+      email: 'a@b.c',
+      password: 'x',
+      upload_timeout_sec: '240',
+    });
+    void exporter.export(samplePayload);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(mockSpawn.mock.calls[1][2]).toMatchObject({ timeout: 240_000 });
+  });
+
+  it('rejects a non-numeric or out-of-range timeout instead of handing spawn nonsense', async () => {
+    const { createExporterFromEntry } = await import('../../src/exporters/registry.js');
+    const entry = (v: unknown) => ({
+      type: 'garmin' as const,
+      email: 'a@b.c',
+      password: 'x',
+      upload_timeout_sec: v,
+    });
+
+    expect(() => createExporterFromEntry(entry('soon'))).toThrow(/must be a number/);
+    // spawn() throws on a fractional timeout, from inside the promise executor.
+    expect(() => createExporterFromEntry(entry(10.5))).toThrow(/whole number/);
+    expect(() => createExporterFromEntry(entry(5))).toThrow(/between 10 and 900/);
+    expect(() => createExporterFromEntry(entry(3600))).toThrow(/between 10 and 900/);
+  });
 });

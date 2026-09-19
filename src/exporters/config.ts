@@ -15,6 +15,14 @@ export type ExporterName =
   | 'runalyze'
   | 'wger';
 
+/**
+ * Runtime twin of `ExporterName`, for validating `EXPORTERS=...`.
+ *
+ * Hand-maintained, like the union above, and `tests/exporters/registry.test.ts`
+ * asserts it equals the set derived from the registry. Without that assertion a
+ * twelfth exporter added per the documented steps but missed here passes lint,
+ * typecheck and the whole suite, then rejects its own name at startup (#406).
+ */
 const KNOWN_EXPORTERS = new Set<ExporterName>([
   'garmin',
   'mqtt',
@@ -28,6 +36,16 @@ const KNOWN_EXPORTERS = new Set<ExporterName>([
   'runalyze',
   'wger',
 ]);
+
+/** @internal Exported for the registry-agreement test only. */
+export const _knownExporterNamesForTest: ReadonlySet<ExporterName> = KNOWN_EXPORTERS;
+
+export interface GarminConfig {
+  /** Upload the weight alone, leaving every derived metric unset in Garmin. */
+  weightOnly: boolean;
+  /** Seconds one upload attempt may take before it is killed (10-900). */
+  uploadTimeoutSec?: number;
+}
 
 export interface MqttConfig {
   brokerUrl: string;
@@ -106,6 +124,7 @@ export interface WgerConfig {
 
 export interface ExporterConfig {
   exporters: ExporterName[];
+  garmin?: GarminConfig;
   mqtt?: MqttConfig;
   webhook?: WebhookConfig;
   influxdb?: InfluxDbConfig;
@@ -152,6 +171,13 @@ function parsePriority(raw: string | undefined): number {
   fail(`NTFY_PRIORITY must be 1-5, got '${raw}'`);
 }
 
+function parseUploadTimeout(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const num = Number(raw);
+  if (Number.isInteger(num) && num >= 10 && num <= 900) return num;
+  fail(`GARMIN_UPLOAD_TIMEOUT_SEC must be a whole number of seconds, 10-900, got '${raw}'`);
+}
+
 function parseBoolean(key: string, raw: string | undefined, defaultValue: boolean): boolean {
   if (!raw) return defaultValue;
   const lower = raw.toLowerCase();
@@ -176,6 +202,14 @@ export function loadExporterConfig(): ExporterConfig {
 
   if (exporters.length === 0) {
     fail('EXPORTERS must contain at least one exporter.');
+  }
+
+  let garmin: GarminConfig | undefined;
+  if (exporters.includes('garmin')) {
+    garmin = {
+      weightOnly: parseBoolean('GARMIN_WEIGHT_ONLY', process.env.GARMIN_WEIGHT_ONLY?.trim(), false),
+      uploadTimeoutSec: parseUploadTimeout(process.env.GARMIN_UPLOAD_TIMEOUT_SEC?.trim()),
+    };
   }
 
   let mqtt: MqttConfig | undefined;
@@ -364,6 +398,7 @@ export function loadExporterConfig(): ExporterConfig {
 
   return {
     exporters,
+    garmin,
     mqtt,
     webhook,
     influxdb,
