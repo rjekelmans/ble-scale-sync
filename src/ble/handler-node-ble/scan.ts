@@ -215,11 +215,17 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
       );
     }
 
-    // In continuous mode, BlueZ caches the device from a previous cycle.
-    // Removing it forces a fresh discovery + proxy creation.
-    if (targetMac) {
-      await removeDevice(btAdapter, targetMac);
-    }
+    // Previously this unconditionally removed the device from BlueZ's cache
+    // before every cycle (to dodge a stale D-Bus proxy after destroy()), but
+    // that also throws away BlueZ's already-resolved GATT service tree,
+    // forcing a full over-the-air rediscovery (2-19s, highly variable) on
+    // every single attempt -- unlike a paired phone, which reconnects almost
+    // instantly. The per-cycle full D-Bus connection reset added later
+    // (after every GATT operation, see the `finally` block below) already
+    // recreates the adapter/device chain from scratch, making that stale-proxy
+    // workaround redundant here. RemoveDevice is still called after a FAILED
+    // GATT attempt below, which is when a genuinely stale/orphaned device
+    // object is actually possible.
 
     const discoveryResult = await startDiscoverySafe(btAdapter, bleAdapter);
     if (discoveryResult) btAdapter = discoveryResult;
@@ -346,7 +352,16 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
       // connect but before the scan cycle fails, so the consecutive-failure
       // watchdog never trips (#273).
       const gatt = await acquireGattServer(device, preMatchedAdapter, scaleAuth?.pin);
-      const serviceUuids = await gatt.services();
+      // gatt.services() is a separate D-Bus round trip from device.gatt() above
+      // and can hang the same way (#273) if left unguarded: a name-prematched
+      // adapter (e.g. Robi S9) always takes this branch, so an unguarded stall
+      // here freezes every connection attempt at "Discovering services..."
+      // with no timeout, retry, or watchdog trip to recover it.
+      const serviceUuids = await withTimeout(
+        gatt.services(),
+        GATT_DISCOVERY_TIMEOUT_MS,
+        'GATT services() call timed out',
+      );
       bleLog.debug(`Services: [${serviceUuids.join(', ')}]`);
 
       let resolved: ScaleAdapter | undefined;
