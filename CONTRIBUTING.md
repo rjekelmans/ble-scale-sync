@@ -51,7 +51,7 @@ Unit tests use [Vitest](https://vitest.dev/) and cover:
 - **Config writing** — atomic file write, write lock serialization, YAML comment preservation, debounced weight updates
 - **User matching** — 4-tier weight matching, all strategies (nearest/log/ignore), overlapping ranges, drift detection
 - **Environment validation** — `validate-env.ts` (all validation rules and edge cases)
-- **Scale adapters** — `parseNotification()`, `matches()`, `isComplete()`, `computeMetrics()`, and `onConnected()` for all 32 adapters
+- **Scale adapters** — `parseNotification()`, `matches()`, `isComplete()`, `computeMetrics()`, and `onConnected()` for all 35 adapters
 - **Exporters** — config parsing, MQTT publish/HA discovery, MQTT multi-user topic routing + per-user HA discovery, Garmin subprocess, Webhook/InfluxDB/Ntfy delivery, ExportContext, ntfy drift warning
 - **Multi-user flow** — matching → profile resolution → exporter resolution → ExportContext construction, strategy fallback, tiebreak with last_known_weight
 - **Orchestrator** — healthcheck runner, export dispatch, parallel execution, partial/total failure handling
@@ -118,12 +118,13 @@ ble-scale-sync/
 │   │   ├── shared.ts                # BleChar/BleDevice abstractions, waitForReading()
 │   │   ├── async-queue.ts           # Async notification queue for GATT handlers
 │   │   ├── loopback.ts              # In-process loopback handler (tests)
-│   │   ├── handler-node-ble/        # Linux native: node-ble (BlueZ D-Bus) (split: dbus, connection, discovery, freshness, connect, gatt, broadcast, scan)
-│   │   ├── handler-noble-shared.ts  # Shared Noble logic (driver injected via factory)
+│   │   ├── handler-node-ble/        # Linux native: node-ble (BlueZ D-Bus) (split: dbus, connection, discovery, freshness, connect, gatt, broadcast, scan, scan-stages)
+│   │   ├── handler-noble-shared/    # Shared Noble logic, driver injected (split: types, char, peripheral, gatt, state, connect, discovery, broadcast)
 │   │   ├── handler-noble.ts         # macOS native: @stoprocent/noble (thin entrypoint)
 │   │   ├── handler-noble-legacy.ts  # Windows native: @abandonware/noble (thin entrypoint)
 │   │   ├── handler-mqtt-proxy/      # ESP32 proxy over MQTT (split: client, topics, gatt, scan, watcher, display)
-│   │   ├── handler-esphome-proxy.ts # ESPHome BT proxy over Native API (phase 1, broadcast)
+│   │   ├── handler-esphome-proxy/   # ESPHome BT proxy over Native API (split: client, scan, advert)
+│   │   ├── handler-ha-bluetooth/    # Home Assistant websocket transport, broadcast only
 │   │   ├── embedded-broker.ts       # Embedded aedes MQTT broker for ESP32 proxy
 │   │   └── mqtt-proxy-bootstrap.ts  # First-run scan + adapter pin for ESP32 proxy
 │   ├── exporters/

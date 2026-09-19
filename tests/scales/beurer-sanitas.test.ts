@@ -43,6 +43,39 @@ describe('BeurerSanitasScaleAdapter', () => {
     });
   });
 
+  // Frames byte-for-byte from the #384 debug log (Sanitas SBF70 over an ESPHome
+  // proxy, adapter forced so matches() never ran).
+  describe('variant latching from the frame, without a name (#384)', () => {
+    it('reads the 5-byte 0xE7 0x58 live frame as weight, not as nothing', () => {
+      const adapter = makeAdapter();
+      const reading = adapter.parseNotification(Buffer.from('e758010713', 'hex'));
+      // 0x0713 = 1811, * 50 / 1000 = 90.55 kg, the reporter's real ~90 kg.
+      expect(reading?.weight).toBeCloseTo(90.55, 2);
+    });
+
+    it('never decodes the 0x59 finalize frame as the bogus constant 12.80 kg', () => {
+      const adapter = makeAdapter();
+      adapter.parseNotification(Buffer.from('e758010713', 'hex'));
+      const reading = adapter.parseNotification(Buffer.from('e759030101000000000000000065', 'hex'));
+      expect(reading?.weight).not.toBeCloseTo(12.8, 2);
+    });
+
+    it('decodes the same 0x59 frame as 12.80 kg only on the BF700 layout, which is the bug', () => {
+      // Guards the discriminator itself: a BF700 frame opens with a Unix
+      // timestamp, so its top byte is nowhere near 0xE7 and the latch stays off.
+      const adapter = makeAdapter();
+      adapter.matches(mockPeripheral('bf-700'));
+      const bf700 = Buffer.from('69000000012c00000000000000000000', 'hex');
+      expect(adapter.parseNotification(bf700)?.weight).toBeGreaterThan(0);
+    });
+
+    it('leaves a BF700 on its own layout, since no frame of its starts 0xE7', () => {
+      const adapter = makeAdapter();
+      adapter.matches(mockPeripheral('bf-700'));
+      expect(adapter.unlockCommand).toEqual([0xf7, 0x01]);
+    });
+  });
+
   describe('unlockCommand', () => {
     it('returns 0xF7 for BF700/BF800 type', () => {
       const adapter = makeAdapter();
@@ -317,5 +350,145 @@ describe('BeurerSanitasScaleAdapter', () => {
       const payload = adapter.computeMetrics({ weight: 0, impedance: 0 }, profile);
       expect(payload.weight).toBe(0);
     });
+  });
+});
+
+// #386: this adapter parses an impedance out of the scale's frames and used to
+// hand buildPayload an empty comp, so the exported body fat was the Deurenberg
+// BMI estimate and the impedance was published but ignored.
+//
+// At 80 kg / 183 cm / 30 / male the two answers are far apart, which is the
+// point: 19.37 % from BMI alone, 25.06 % from a 500 ohm BIA reading.
+describe('Beurer / Sanitas BIA from the parsed impedance (#386)', () => {
+  const BMI_ONLY_FAT = 19.37;
+  const BIA_FAT_AT_500 = 25.06;
+
+  it('computes body fat from a plausible impedance instead of from BMI', () => {
+    const payload = makeAdapter().computeMetrics({ weight: 80, impedance: 500 }, defaultProfile());
+    expect(payload.bodyFatPercent).toBeCloseTo(BIA_FAT_AT_500, 1);
+    expect(payload.impedance).toBe(500);
+  });
+
+  it('moves every derived field with it, not just the fat percentage', () => {
+    const payload = makeAdapter().computeMetrics({ weight: 80, impedance: 500 }, defaultProfile());
+    expect(payload.physiqueRating).toBe(2);
+    expect(payload.visceralFat).toBe(12);
+    expect(payload.waterPercent).toBeCloseTo(54.7, 2);
+  });
+
+  it('falls back to the BMI estimate when the impedance is not a body', () => {
+    for (const impedance of [1, 149, 1201, 65535]) {
+      const payload = makeAdapter().computeMetrics({ weight: 80, impedance }, defaultProfile());
+      expect(payload.bodyFatPercent).toBeCloseTo(BMI_ONLY_FAT, 1);
+    }
+  });
+
+  it('still falls back when no impedance was measured at all', () => {
+    const payload = makeAdapter().computeMetrics({ weight: 80, impedance: 0 }, defaultProfile());
+    expect(payload.bodyFatPercent).toBeCloseTo(BMI_ONLY_FAT, 1);
+  });
+});
+
+describe('Beurer / Sanitas: a zeroed composition is not a measurement (#386)', () => {
+  it('does not export 0 % body fat when the frame carries a real impedance', () => {
+    // buildPayload gates on `comp.fat ?? estimateBodyFat(...)`, which 0 passes.
+    // A frame with a resistance next to a zeroed fat used to export 0 % fat,
+    // 73 % water and a muscle mass equal to the whole body. The sibling SIG
+    // adapter has guarded this since #211; this one did not.
+    const adapter = makeAdapter();
+    const buf = Buffer.alloc(16);
+    buf.writeUInt16BE(1600, 4); // weight = 80 kg
+    buf.writeUInt16BE(500, 6); // impedance = 500 ohm, a real measurement
+    // fat, water, muscle and bone all left at 0.
+    const reading = adapter.parseNotification(buf);
+    expect(reading).not.toBeNull();
+
+    const payload = adapter.computeMetrics(reading!, defaultProfile());
+    // 500 ohm is in band, so the BIA figure is used rather than a zero.
+    expect(payload.bodyFatPercent).toBeCloseTo(25.06, 1);
+    expect(payload.muscleMass).toBeLessThan(80);
+    assertPayloadRanges(payload);
+  });
+
+  it('still prefers the composition the scale sent, when it sent one', () => {
+    const adapter = makeAdapter();
+    const buf = Buffer.alloc(16);
+    buf.writeUInt16BE(1600, 4);
+    buf.writeUInt16BE(500, 6);
+    buf.writeUInt16BE(225, 8); // fat = 22.5 %
+    const reading = adapter.parseNotification(buf);
+    const payload = adapter.computeMetrics(reading!, defaultProfile());
+    expect(payload.bodyFatPercent).toBeCloseTo(22.5, 2);
+  });
+});
+
+// #394: the adapter is a shared singleton, so gating state from one weigh-in
+// used to survive into the next. This is the most intricate reset in the set:
+// `readingBuffer` drives the BF710 three-sample stability gate and `compParts`
+// drives the multipart 0x59 reassembly, and two further fields are deliberately
+// NOT cleared (see the onSessionStart doc comment).
+describe('BeurerSanitasScaleAdapter session boundary (#394)', () => {
+  /** BF710 live weight frame: E7 58 xx [weight u16 BE, *50/1000]. */
+  function bf710Weight(raw: number): Buffer {
+    const buf = Buffer.from('e7580000 00'.replace(/ /g, ''), 'hex');
+    buf.writeUInt16BE(raw, 3);
+    return buf;
+  }
+
+  it('re-arms the three-sample stability gate for each session', () => {
+    const adapter = makeAdapter();
+    // Three identical samples satisfy the gate.
+    adapter.parseNotification(bf710Weight(1811));
+    adapter.parseNotification(bf710Weight(1811));
+    const settled = adapter.parseNotification(bf710Weight(1811))!;
+    expect(adapter.isComplete(settled)).toBe(true);
+
+    adapter.onSessionStart();
+
+    // First frame of the next session, within the 0.3 kg tolerance of the
+    // previous person (the realistic case - two adults in the same household
+    // rarely differ by more than the gate notices on frame one). With the
+    // buffer carried over, [90.55, 90.55, 90.60] satisfied the gate on that
+    // single frame and the session completed on an unsettled weight.
+    const first = adapter.parseNotification(bf710Weight(1812))!;
+    expect(adapter.isComplete(first)).toBe(false);
+  });
+
+  it('does not splice a composition out of two different weigh-ins', () => {
+    const adapter = makeAdapter();
+    adapter.parseNotification(bf710Weight(1811));
+    // Part 2 of a 3-part 0x59 stream; the session dies before part 3 arrives.
+    // Payload bytes 0..9 of the merged 16-byte composition structure.
+    adapter.parseNotification(Buffer.from('e7590302' + '00000000064001f400e1', 'hex'));
+
+    adapter.onSessionStart();
+
+    // Next session sends part 3 only: payload bytes 10..15. With the orphan
+    // part 2 still held, the two concatenated reached the 16 bytes the decoder
+    // needs and it returned a reading spliced out of two different weigh-ins.
+    const spliced = adapter.parseNotification(Buffer.from('e7590303' + '022601900014', 'hex'));
+    expect(spliced).toBeNull();
+  });
+
+  it('keeps the completed reading composition when the NEXT session starts first', () => {
+    // computeMetrics runs after the parse that built the reading, and the very
+    // next parse nulls cachedComp. On the watcher transports that next parse
+    // can already belong to the next session, so the composition has to travel
+    // on the reading rather than in the live cache.
+    const adapter = makeAdapter();
+    const buf = Buffer.alloc(16);
+    buf.writeUInt16BE(1600, 4); // 80 kg
+    buf.writeUInt16BE(500, 6); // 500 ohm
+    buf.writeUInt16BE(225, 8); // fat 22.5 %
+    const reading = adapter.parseNotification(buf)!;
+
+    adapter.onSessionStart();
+    // The next session's first frame nulls cachedComp on its way through.
+    const next = Buffer.alloc(16);
+    next.writeUInt16BE(1300, 4);
+    adapter.parseNotification(next);
+
+    const payload = adapter.computeMetrics(reading, defaultProfile());
+    expect(payload.bodyFatPercent).toBeCloseTo(22.5, 2);
   });
 });

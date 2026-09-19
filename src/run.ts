@@ -19,6 +19,7 @@ import { loadAppConfig } from './config/load.js';
 import { resolveRuntimeConfig } from './config/resolve.js';
 import { startConfigWatcher, type ConfigWatcherHandle } from './config/watch.js';
 import { configureUpdateState } from './update-state.js';
+import { flushQueue } from './runtime/export-queue.js';
 import type { Exporter } from './interfaces/exporter.js';
 import type { ScaleAdapter } from './interfaces/scale-adapter.js';
 import { createAppContext } from './runtime/context.js';
@@ -30,6 +31,7 @@ import { buildReadingSource } from './runtime/sources.js';
 import {
   buildSingleUserExporters,
   getExportersForUser,
+  collectConfiguredExporters,
   buildAllUniqueExporters,
 } from './runtime/exporters.js';
 
@@ -99,12 +101,31 @@ const HARD_EXIT_GRACE_MS = ((): number => {
 
 const ac = new AbortController();
 
+// Was this abort asked for by an operator (SIGINT/SIGTERM), or did something
+// go wrong? Only the exit code of a shutdown that then hangs depends on it: a
+// stop the operator asked for is not a failure and must not be reported as one
+// by a supervisor (#335). Set before `ac.abort()`, which dispatches its
+// listeners synchronously.
+let deliberateStop = false;
+
 // Register the hard-exit safety net before anything can abort `ac`. Armed
 // once on the first abort (watchdog trip, SIGTERM, or any internal abort);
 // idempotent, unref'd, so a clean drain still exits naturally first (#194).
-ac.signal.addEventListener('abort', () => armHardExit({ timeoutMs: HARD_EXIT_GRACE_MS, log }), {
-  once: true,
-});
+//
+// The flag is read at ARM time, and the first abort wins. A watchdog trip
+// followed by a SIGTERM therefore arms with 1, which is right: both watchdog
+// paths set `process.exitCode = 1` first, and that wins over `fallbackCode`
+// regardless.
+ac.signal.addEventListener(
+  'abort',
+  () =>
+    armHardExit({
+      timeoutMs: HARD_EXIT_GRACE_MS,
+      log,
+      fallbackCode: deliberateStop ? 0 : 1,
+    }),
+  { once: true },
+);
 const ctx = createAppContext({
   config: initialConfig,
   resolved: initialResolved,
@@ -124,6 +145,7 @@ function onSignal(): void {
     process.exit(1);
   }
   forceExitOnNext = true;
+  deliberateStop = true;
   log.info('\nShutting down gracefully... (press again to force exit)');
   // Close the config watcher first so a late-fire fs event does not flip
   // needsReload after the loop has already abort()ed.
@@ -267,17 +289,32 @@ async function main(): Promise<void> {
   }
   log.info(`Adapters: ${adapters.map((a) => a.name).join(', ')}\n`);
 
-  // Inject runtime config into adapters that read it: the Xiaomi S800 MiBeacon
-  // bind key, and the configured display unit that the QN 0x13 command echoes to
-  // the scale (#269). Optional + no-op for adapters without configure().
+  // Inject runtime config into adapters that read it: the Xiaomi S800 / S400
+  // MiBeacon bind key (plus the scale MAC the S400 needs for its nonce), and the
+  // configured display unit that the QN 0x13 command echoes to the scale (#269).
+  // Optional + no-op for adapters without configure().
   // Re-applied on config reload below so a hot-edited key or unit takes effect.
   const applyAdapterConfig = (bindKey: string | undefined): void => {
+    const scaleMac = ctx.scaleMac ?? undefined;
     const weightUnit = ctx.config.scale.weight_unit;
     const qnProtocolByte = ctx.config.ble?.qn_protocol_byte ?? undefined;
     const qnReportByte = ctx.config.ble?.qn_report_byte ?? undefined;
     const qnWeightAck = ctx.config.ble?.qn_weight_ack ?? undefined;
+    const qnA4Prelude = ctx.config.ble?.qn_a4_prelude ?? undefined;
+    const qnTimeSyncLong = ctx.config.ble?.qn_time_sync_long ?? undefined;
+    const qnConfigLong = ctx.config.ble?.qn_config_long ?? undefined;
     for (const a of adapters)
-      a.configure?.({ bindKey, weightUnit, qnProtocolByte, qnReportByte, qnWeightAck });
+      a.configure?.({
+        bindKey,
+        scaleMac,
+        weightUnit,
+        qnProtocolByte,
+        qnReportByte,
+        qnWeightAck,
+        qnA4Prelude,
+        qnTimeSyncLong,
+        qnConfigLong,
+      });
   };
   applyAdapterConfig(ctx.config.ble?.bind_key ?? undefined);
 
@@ -313,7 +350,24 @@ async function main(): Promise<void> {
       getExportersForUser: (slug) => getExportersForUser(ctx, slug),
     });
 
+  // At the START of a single run, not after its dispatch: a total export
+  // failure exits non-zero below, before any post-dispatch code could run, and
+  // that is exactly the run that just queued something (#412).
+  const flushQueuedExports = async (): Promise<void> => {
+    if (!ctx.exportQueuePath) return;
+    // A dry run promises to skip exports, and a queued upload firing under it
+    // is exactly what that promise is about. Nothing is delivered and nothing
+    // is dropped: the queue is left for a real run.
+    if (ctx.dryRun) return;
+    try {
+      await flushQueue(ctx.exportQueuePath, collectConfiguredExporters(ctx));
+    } catch (err) {
+      log.debug(`Retrying queued exports failed: ${errMsg(err)}`);
+    }
+  };
+
   if (!initialResolved.continuousMode) {
+    await flushQueuedExports();
     const source = new PollReadingSource(ctx, adapters);
     const raw = await source.nextReading(ctx.signal);
     const success = await runProcessReading(raw);
@@ -362,6 +416,8 @@ async function main(): Promise<void> {
     onSourceReload: bundle.onSourceReload,
     onSuccess: bundle.onSuccess,
     onFailure: bundle.onFailure,
+    onCycleStart: flushQueuedExports,
+    failureDelayMs: bundle.failureDelayMs,
     failureLogPrefix: bundle.failureLogPrefix,
   });
 

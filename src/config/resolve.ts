@@ -8,6 +8,7 @@ import type {
   WeightUnit,
   MqttProxyConfig,
   EsphomeProxyConfig,
+  HaBluetoothConfig,
 } from './schema.js';
 
 // --- User profile resolution ---
@@ -83,12 +84,14 @@ export interface ResolvedRuntimeConfig {
   dryRun: boolean;
   continuousMode: boolean;
   scanCooldownSec: number;
+  retryFailedExports: boolean;
   watchdogMaxFailures: number;
   watchConfig: boolean;
   bleHandler: BleHandlerName;
   bleAdapter?: string;
   mqttProxy?: MqttProxyConfig;
   esphomeProxy?: EsphomeProxyConfig;
+  haBluetooth?: HaBluetoothConfig;
 }
 
 /**
@@ -105,12 +108,14 @@ export function resolveRuntimeConfig(config: AppConfig): ResolvedRuntimeConfig {
     dryRun: config.runtime?.dry_run ?? false,
     continuousMode: config.runtime?.continuous_mode ?? false,
     scanCooldownSec: config.runtime?.scan_cooldown ?? 30,
+    retryFailedExports: config.runtime?.retry_failed_exports ?? true,
     watchdogMaxFailures: config.runtime?.watchdog_max_consecutive_failures ?? 10,
     watchConfig: config.runtime?.watch_config ?? true,
     bleHandler: config.ble?.handler ?? 'auto',
     bleAdapter: config.ble?.adapter ?? undefined,
     mqttProxy: config.ble?.mqtt_proxy ?? undefined,
     esphomeProxy: config.ble?.esphome_proxy ?? undefined,
+    haBluetooth: config.ble?.ha_bluetooth ?? undefined,
   };
 }
 

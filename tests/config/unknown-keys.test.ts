@@ -39,12 +39,26 @@ describe('collectUnknownKeys', () => {
         force_scale_adapter: 'Hutbit',
         qn_protocol_byte: 255,
         qn_report_byte: 252,
+        qn_weight_ack: true,
+        qn_a4_prelude: true,
+        qn_time_sync_long: true,
+        qn_config_long: true,
+        auto_clear_stale_bond: true,
+        proxy_liveness_timeout_min: 45,
       },
       scale: { weight_unit: 'kg', height_unit: 'cm' },
       unknown_user: 'nearest',
+      out_of_range: 'skip',
       users: [{ ...USER, exporters: [{ type: 'mqtt', broker_url: 'mqtt://h:1883' }] }],
       global_exporters: [{ type: 'mqtt', broker_url: 'mqtt://h:1883', qos: 0, retain: true }],
-      runtime: { continuous_mode: true, scan_cooldown: 30, dry_run: false, debug: false },
+      runtime: {
+        continuous_mode: true,
+        scan_cooldown: 30,
+        idle_rescan_delay: 5,
+        retry_failed_exports: true,
+        dry_run: false,
+        debug: false,
+      },
       update_check: true,
     };
     expect(collectUnknownKeys(generated)).toEqual([]);
@@ -82,6 +96,11 @@ describe('collectUnknownKeys', () => {
   it('reports an unknown key under ble.esphome_proxy', () => {
     const cfg = { ...BASE, ble: { esphome_proxy: { host: '10.0.0.5', encryption_ky: 'x' } } };
     expect(collectUnknownKeys(cfg)).toEqual(['ble.esphome_proxy.encryption_ky']);
+  });
+
+  it('reports an unknown key under ble.ha_bluetooth', () => {
+    const cfg = { ...BASE, ble: { ha_bluetooth: { url: 'http://h:8123', token: 't', tokn: 'x' } } };
+    expect(collectUnknownKeys(cfg)).toEqual(['ble.ha_bluetooth.tokn']);
   });
 
   it('reports an unknown key inside additional_proxies by index', () => {
@@ -127,6 +146,7 @@ describe('collectUnknownKeys', () => {
         force_scale_adapter: 'Hutbit',
         mqtt_proxy: { broker_url: 'mqtt://h:1883' },
         esphome_proxy: { host: 'h' },
+        ha_bluetooth: { url: 'http://h:8123', token: 't', source: 'aa' },
       },
     };
     expect(collectUnknownKeys(cfg)).toEqual([]);

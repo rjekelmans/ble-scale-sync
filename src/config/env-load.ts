@@ -19,6 +19,11 @@ export function loadEnvConfig(): AppConfig {
   const globalExporters: ExporterEntry[] = exporterConfig.exporters.map((name) => {
     const entry: Record<string, unknown> = { type: name };
 
+    if (name === 'garmin' && exporterConfig.garmin) {
+      Object.assign(entry, {
+        weight_only: exporterConfig.garmin.weightOnly,
+      });
+    }
     if (name === 'mqtt' && exporterConfig.mqtt) {
       const m = exporterConfig.mqtt;
       Object.assign(entry, {
@@ -115,6 +120,9 @@ export function loadEnvConfig(): AppConfig {
       height_unit: 'cm', // env-var config already converts to cm
     },
     unknown_user: 'nearest',
+    // Env-var config has one synthetic user with a 0-999 kg range, so the guard
+    // can never fire; the field is here because AppConfig requires it.
+    out_of_range: 'warn',
     users: [
       {
         name: 'Default',
@@ -135,6 +143,8 @@ export function loadEnvConfig(): AppConfig {
       debug: process.env.DEBUG === 'true',
       watchdog_max_consecutive_failures: 10,
       watch_config: true,
+      idle_rescan_delay: 5,
+      retry_failed_exports: true,
     },
     update_check: true,
   };
