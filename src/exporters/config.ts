@@ -1,4 +1,5 @@
 import { createLogger } from '../logger.js';
+import { parseHeaderString } from './headers.js';
 
 const log = createLogger('ExporterConfig');
 
@@ -149,17 +150,12 @@ function parseQos(raw: string | undefined): 0 | 1 | 2 {
 }
 
 function parseHeaders(raw: string | undefined): Record<string, string> {
-  if (!raw) return {};
-  const headers: Record<string, string> = {};
-  for (const pair of raw.split(',')) {
-    const idx = pair.indexOf(':');
-    if (idx < 1) {
-      log.warn(`Ignoring invalid header (missing ':'): '${pair.trim()}'`);
-      continue;
-    }
-    const key = pair.slice(0, idx).trim();
-    const value = pair.slice(idx + 1).trim();
-    if (key) headers[key] = value;
+  // Shared with the config.yaml path in registry.ts. This parser was correct
+  // and the yaml path was not, so the rule lives in one place now rather than
+  // being reimplemented a third time.
+  const { headers, invalid } = parseHeaderString(raw ?? '');
+  for (const pair of invalid) {
+    log.warn(`Ignoring invalid header (missing ':'): '${pair}'`);
   }
   return headers;
 }
