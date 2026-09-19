@@ -40,7 +40,7 @@ _Weight only_ means weight is reported normally but body composition is estimate
 | **Senssun** Fat                                                       | Yes              | Model A only                                                                                           |
 | **MGB** (Swan / Icomon / YG)                                          | Yes              |                                                                                                        |
 | **Hutbit** 218008 / WL292                                             | Yes              | Also sold under stock `SWAN` branding                                                                  |
-| **Robi** S9                                                           | Yes              | BIA is computed locally from decoded impedance                                                        |
+| **Robi** S9                                                           | Yes              | Dynamic handshake; BIA is computed locally from decoded impedance                             |
 | **Speediance** Smart Scale FG2211WBF                                  | Yes              | Lefu/Icomon sibling of the Robi S9                  |
 | **Digoo** DG-SO38H (Mengii)                                           | Yes              |                                                                                                        |
 | **Excelvan** CF369                                                    | Yes              |                                                                                                        |
@@ -99,7 +99,7 @@ Weight is read and verified. Body composition is estimated from BMI (Deurenberg 
 
 ### **Robi** S9
 
-The scale's final result includes weight and impedance. BLE Scale Sync uses the impedance with the local user profile to calculate body composition; the scale's own vendor-side body-composition values are not decoded.
+The scale's final result includes weight and impedance. BLE Scale Sync sends a dynamic handshake containing the configured height, sex, age, and current timestamp, then uses the returned impedance with the local profile to calculate body composition.
 
 ### **Eufy** Smart Scale P2 / P2 Pro
 

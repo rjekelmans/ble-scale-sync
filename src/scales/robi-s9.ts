@@ -19,20 +19,54 @@ import type { MatchDescriptor } from './match-descriptor.js';
 const CHR_FFB1 = uuid16(0xffb1); // write (handshake)
 const CHR_FFB2 = uuid16(0xffb2); // notify (live frames)
 const CHR_FFB3 = uuid16(0xffb3); // indicate (final result) - see binding note
+const ROBI_FRAME_LENGTH = 20;
+const ROBI_TRAILER_MASK = 0x1f;
+const ROBI_BA_CONSTANT = 0x78;
+const ROBI_BA_TRAILER_CONSTANT = 0x2f;
 
-/**
- * Handshake: `B0` hello, then three `BA` frames. The frame bytes are a
- * captured from Fitdays and replayed on each connection. The scale accepts
- * these frames repeatedly, including their stale timestamp and checksum.
- */
-function buildHandshake(): Buffer[] {
-  // The trailer checksum is unknown, so these captured handshake frames are replayed verbatim.
-  return [
-    Buffer.from('000300b073000000000000000000000000000003', 'hex'),
-    Buffer.from('011000ba6a932cc7007800000000ac1770982f1c', 'hex'),
-    Buffer.from('021000ba6a932cc7007800000000aa00009d2f18', 'hex'),
-    Buffer.from('031000ba6a932cc7007800000000aa00009d2f18', 'hex'),
-  ];
+/** The protocol keeps only the low five bits of this frame sum. */
+export function robiS9Trailer(frame: Buffer): number {
+  return frame.subarray(3, 19).reduce((sum, byte) => sum + byte, 0) & ROBI_TRAILER_MASK;
+}
+
+function withTrailer(frame: Buffer): Buffer {
+  frame[19] = robiS9Trailer(frame);
+  return frame;
+}
+
+function buildHandshake(profile: UserProfile, sequenceAnchor: number, now = new Date()): Buffer[] {
+  const timestamp = Math.floor(now.getTime() / 1000);
+  const timestampBytes = Buffer.alloc(4);
+  timestampBytes.writeUInt32BE(timestamp >>> 0);
+  const age = Math.max(0, Math.min(0x7f, Math.round(profile.age)));
+  const profileByte = (profile.gender === 'male' ? 0x80 : 0) | age;
+
+  const hello = Buffer.alloc(ROBI_FRAME_LENGTH);
+  hello.set([0x00, 0x03, 0x00, 0xb0, sequenceAnchor & 0xff]);
+
+  const config = Buffer.alloc(ROBI_FRAME_LENGTH);
+  config.set([0x01, 0x10, 0x00, 0xba]);
+  timestampBytes.copy(config, 4);
+  config[8] = 0x00;
+  config[9] = ROBI_BA_CONSTANT;
+  config[14] = 0xac;
+  config.writeUInt16BE(0x1770, 15);
+  config[17] = 0x98;
+  config[18] = ROBI_BA_TRAILER_CONSTANT;
+
+  const user = Buffer.from(config);
+  user[0] = 0x02;
+  user[14] = Math.max(0, Math.min(255, Math.round(profile.height)));
+  user.writeUInt16BE(0, 15);
+  user[17] = profileByte;
+
+  const userRepeat = Buffer.from(user);
+  userRepeat[0] = 0x03;
+
+  const close = Buffer.alloc(ROBI_FRAME_LENGTH);
+  close.set([0x04, 0x03, 0x00, 0xb0, (sequenceAnchor + 4) & 0xff]);
+
+  return [hello, config, user, userRepeat, close].map(withTrailer);
 }
 
 // Weight is stored as a 3-byte big-endian gram count in the A3 result frame
@@ -84,6 +118,7 @@ export class RobiS9Adapter implements ScaleAdapterCore, GattWiring, MultiCharNot
 
   private cachedWeight = 0;
   private cachedImpedance = 0;
+  private sequenceAnchor = 0;
   private final = false;
 
   matches(device: BleDeviceInfo): boolean {
@@ -124,11 +159,12 @@ export class RobiS9Adapter implements ScaleAdapterCore, GattWiring, MultiCharNot
   onSessionStart(): void {
     this.cachedWeight = 0;
     this.cachedImpedance = 0;
+    this.sequenceAnchor = 0;
     this.final = false;
   }
 
   async onConnected(ctx: ConnectionContext): Promise<void> {
-    for (const frame of buildHandshake()) {
+    for (const frame of buildHandshake(ctx.profile, this.sequenceAnchor)) {
       await ctx.write(CHR_FFB1, frame, true);
       await new Promise((r) => setTimeout(r, 150));
     }
@@ -146,6 +182,10 @@ export class RobiS9Adapter implements ScaleAdapterCore, GattWiring, MultiCharNot
 
   parseCharNotification(_charUuid: string, data: Buffer): ScaleReading | null {
     if (data.length < 11 || data[2] !== 0x00) return null;
+    if (data.length === ROBI_FRAME_LENGTH && data[3] >= 0xa0 && data[3] <= 0xa3) {
+      if (data[19] !== robiS9Trailer(data)) return null;
+      if (data[3] === 0xa1) this.sequenceAnchor = data[0];
+    }
     bleLog.debug(`Robi S9 frame: ${data.toString('hex')}`);
 
     // Final result arrives as the A3 frame on FFB3. A2 (live) frames use a
