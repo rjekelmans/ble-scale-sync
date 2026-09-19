@@ -215,12 +215,6 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
       );
     }
 
-    // In continuous mode, BlueZ caches the device from a previous cycle.
-    // Removing it forces a fresh discovery + proxy creation.
-    if (targetMac) {
-      await removeDevice(btAdapter, targetMac);
-    }
-
     const discoveryResult = await startDiscoverySafe(btAdapter, bleAdapter);
     if (discoveryResult) btAdapter = discoveryResult;
     probeAdapter = btAdapter;
