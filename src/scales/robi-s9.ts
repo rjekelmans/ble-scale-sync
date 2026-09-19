@@ -44,7 +44,6 @@ function buildHandshake(): Buffer[] {
   ];
 }
 
-
 // Weight is stored as a 3-byte big-endian gram count in the A3 result frame
 // (#248: 01 2d c2 = 77250 g = 77.25 kg). The earlier #228 guess treated the high
 // gram bytes (01 2c..) as a constant prefix because both prior captures were
