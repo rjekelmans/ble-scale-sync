@@ -40,7 +40,7 @@ _Weight only_ means weight is reported normally but body composition is estimate
 | **Senssun** Fat                                                       | Yes              | Model A only                                                                                           |
 | **MGB** (Swan / Icomon / YG)                                          | Yes              |                                                                                                        |
 | **Hutbit** 218008 / WL292                                             | Yes              | Also sold under stock `SWAN` branding                                                                  |
-| **Robi** S9                                                           | Weight only      |                                                                                                        |
+| **Robi** S9                                                           | Yes              | BIA is computed locally from decoded impedance                                                        |
 | **Speediance** Smart Scale FG2211WBF                                  | Yes              | Lefu/Icomon sibling of the Robi S9                  |
 | **Digoo** DG-SO38H (Mengii)                                           | Yes              |                                                                                                        |
 | **Excelvan** CF369                                                    | Yes              |                                                                                                        |
@@ -96,6 +96,10 @@ The measurement protocol is implemented and verified, but this hardware's GATT c
 ### **Renpho** R-MSC04 (MorphoScan Nova)
 
 Weight is read and verified. Body composition is estimated from BMI (Deurenberg formula) rather than measured impedance. The vendor handshake is documented but not yet implemented, and the scale also closes the link after its history sync, so a reconnect is needed before the live measurement arrives. Tracked in [#117](https://github.com/KristianP26/ble-scale-sync/issues/117).
+
+### **Robi** S9
+
+The scale's final result includes weight and impedance. BLE Scale Sync uses the impedance with the local user profile to calculate body composition; the scale's own vendor-side body-composition values are not decoded.
 
 ### **Eufy** Smart Scale P2 / P2 Pro
 
