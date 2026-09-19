@@ -184,7 +184,7 @@ describe('scanAndReadRaw call order (#368)', () => {
     expect(seen[0]).toBe('setPairingTarget');
   });
 
-  it('does not evict the cached device on a successful cycle', async () => {
+  it('does not remove the device before discovery on a successful cycle', async () => {
     const seen = await run();
     expect(seen).not.toContain('removeDevice');
     expect(seen.indexOf('startDiscoverySafe')).toBeLessThan(seen.indexOf('waitDevice'));
