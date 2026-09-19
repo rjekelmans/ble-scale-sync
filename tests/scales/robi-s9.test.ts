@@ -86,6 +86,14 @@ describe('RobiS9Adapter', () => {
       expect(adapter.isComplete(reading!)).toBe(true);
     });
 
+    it('extracts impedance from the A3 final frame', () => {
+      const adapter = makeAdapter();
+      const a3 = Buffer.from('030800a300012dc24801ed0000000000000013', 'hex');
+      const reading = adapter.parseCharNotification(uuid16(0xffb3), a3);
+
+      expect(reading?.impedance).toBe(493);
+    });
+
     it('ignores A2 live frames (no final result yet)', () => {
       const adapter = makeAdapter();
       const a2 = Buffer.from('1d0700a20400012c000000000000000000000013', 'hex');
