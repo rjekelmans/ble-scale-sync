@@ -32,7 +32,6 @@ import { getBus, attachBusErrorHandler, isDbusConnectionError, dbusError } from 
 import { registerPairingAgent, setPairingTarget } from './agent.js';
 import {
   startDiscoverySafe,
-  removeDevice,
   autoDiscover,
   stopDiscoveryAndQuiesce,
 } from './discovery.js';
