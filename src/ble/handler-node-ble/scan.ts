@@ -30,11 +30,7 @@ import {
 import { applyDbusMatchRefcountPatch } from './dbus-match-patch.js';
 import { getBus, attachBusErrorHandler, isDbusConnectionError, dbusError } from './connection.js';
 import { registerPairingAgent, setPairingTarget } from './agent.js';
-import {
-  startDiscoverySafe,
-  autoDiscover,
-  stopDiscoveryAndQuiesce,
-} from './discovery.js';
+import { startDiscoverySafe, autoDiscover, stopDiscoveryAndQuiesce } from './discovery.js';
 import { connectWithRecovery } from './connect.js';
 import { logAdvertisementSnapshot } from './device-object.js';
 import { wrapDevice } from './gatt.js';
