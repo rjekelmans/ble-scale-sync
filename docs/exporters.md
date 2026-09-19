@@ -31,12 +31,12 @@ Exporters are configured in `global_exporters` (shared by all users). For multi-
 
 Automatic body composition upload to Garmin Connect, no phone app needed. Uses a Python subprocess with cached authentication tokens.
 
-| Field         | Required | Default            | Description                                                    |
-| ------------- | -------- | ------------------ | -------------------------------------------------------------- |
-| `email`       | Yes      | (none)             | Garmin account email                                           |
-| `password`    | Yes      | (none)             | Garmin account password                                        |
-| `token_dir`   | No       | `~/.garmin_tokens` | Directory for cached auth tokens                               |
-| `weight_only` | No       | `false`            | Upload the weight alone, leaving every derived metric unset     |
+| Field                | Required | Default            | Description                                                                                                          |
+| -------------------- | -------- | ------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `email`              | Yes      | (none)             | Garmin account email                                                                                                 |
+| `password`           | Yes      | (none)             | Garmin account password                                                                                              |
+| `token_dir`          | No       | `~/.garmin_tokens` | Directory for cached auth tokens                                                                                     |
+| `weight_only`        | No       | `false`            | Upload the weight alone, leaving every derived metric unset                                                          |
 | `upload_timeout_sec` | No       | `180`              | Seconds one upload attempt may take before it is killed (10-900). Three attempts are made, with no wait between them |
 
 ```yaml
@@ -159,12 +159,12 @@ global_exporters:
 
 Sends body composition as JSON to any HTTP endpoint. Works with n8n, Make, Zapier, or custom APIs.
 
-| Field     | Required | Default | Description                  |
-| --------- | -------- | ------- | ---------------------------- |
-| `url`     | Yes      | (none)  | Target URL                   |
-| `method`  | No       | `POST`  | HTTP method                  |
-| `headers` | No       | (none)  | Custom headers (YAML object) |
-| `timeout` | No       | `10000` | Request timeout in ms        |
+| Field     | Required | Default | Description                                                                  |
+| --------- | -------- | ------- | ---------------------------------------------------------------------------- |
+| `url`     | Yes      | (none)  | Target URL                                                                   |
+| `method`  | No       | `POST`  | HTTP method                                                                  |
+| `headers` | No       | (none)  | Custom headers, as a YAML object or a `Name: value` list separated by commas |
+| `timeout` | No       | `10000` | Request timeout in ms                                                        |
 
 ```yaml
 global_exporters:
@@ -437,19 +437,19 @@ Several other scales replay a cache without a usable time. Salter is the explici
 
 A reading with a timestamp is sent **only to exporters that can record it at that time**:
 
-| Exporter | Accepts a backdated reading |
-| --- | --- |
-| `file` | Yes |
-| `garmin` | Yes |
-| `influxdb` | Yes |
-| `intervals` | Yes |
-| `runalyze` | Yes |
-| `wger` | Yes |
-| `mqtt` | No |
-| `webhook` | No |
-| `ntfy` | No |
-| `strava` | No |
-| `telegram` | No |
+| Exporter    | Accepts a backdated reading |
+| ----------- | --------------------------- |
+| `file`      | Yes                         |
+| `garmin`    | Yes                         |
+| `influxdb`  | Yes                         |
+| `intervals` | Yes                         |
+| `runalyze`  | Yes                         |
+| `wger`      | Yes                         |
+| `mqtt`      | No                          |
+| `webhook`   | No                          |
+| `ntfy`      | No                          |
+| `strava`    | No                          |
+| `telegram`  | No                          |
 
 The five that say No have no way to express "this happened on Tuesday": an MQTT sensor state and a push notification are both about now, so replaying a three-day-old weigh-in through them would put a stale number in front of you as if it had just been measured.
 
