@@ -9,7 +9,13 @@ import type {
   UserProfile,
   BodyComposition,
 } from '../interfaces/scale-adapter.js';
-import { uuid16, buildPayload } from './body-comp-helpers.js';
+import {
+  uuid16,
+  buildPayload,
+  biaFatIfPlausible,
+  IMPEDANCE_MIN_OHM,
+  IMPEDANCE_MAX_OHM,
+} from './body-comp-helpers.js';
 import { bleLog } from '../ble/types.js';
 import { isHutbitOemAdvert } from './lefu-signature.js';
 import type { MatchDescriptor } from './match-descriptor.js';
@@ -199,7 +205,7 @@ export class RobiS9Adapter implements ScaleAdapterCore, GattWiring, MultiCharNot
         // Guarded to a plausible physiological range so a handshake that
         // still comes back all-zero (the #248 symptom) yields 0 -> BIA fallback.
         const imp = data.readUInt16BE(9);
-        this.cachedImpedance = imp >= 150 && imp <= 1200 ? imp : 0;
+        this.cachedImpedance = imp >= IMPEDANCE_MIN_OHM && imp <= IMPEDANCE_MAX_OHM ? imp : 0;
         this.final = true;
       }
     }
@@ -220,6 +226,7 @@ export class RobiS9Adapter implements ScaleAdapterCore, GattWiring, MultiCharNot
   }
 
   computeMetrics(reading: ScaleReading, profile: UserProfile): BodyComposition {
-    return buildPayload(reading.weight, reading.impedance, {}, profile);
+    const fat = biaFatIfPlausible(reading.weight, reading.impedance, profile);
+    return buildPayload(reading.weight, reading.impedance, { fat }, profile);
   }
 }

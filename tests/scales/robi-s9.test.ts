@@ -108,6 +108,15 @@ describe('RobiS9Adapter', () => {
       expect(reading?.impedance).toBe(493);
     });
 
+    it('uses impedance for BIA and falls back to BMI without it', () => {
+      const adapter = makeAdapter();
+      const profile = defaultProfile();
+      const withImpedance = adapter.computeMetrics({ weight: 77.25, impedance: 493 }, profile);
+      const withoutImpedance = adapter.computeMetrics({ weight: 77.25, impedance: 0 }, profile);
+
+      expect(withImpedance.bodyFatPercent).not.toBe(withoutImpedance.bodyFatPercent);
+    });
+
     it('ignores A2 live frames (no final result yet)', () => {
       const adapter = makeAdapter();
       const a2 = Buffer.from('1d0700a20400012c000000000000000000000013', 'hex');
